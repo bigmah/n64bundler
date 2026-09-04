@@ -18,5 +18,21 @@ notes = [
     "boots as far as an indirect call into a segment this record does not yet describe; see PLAN.md",
 ]
 
+[[section]]
+name = "main"
+rom  = 0x026020
+vram = 0x8014CA20
+size = 0x87000
+
 [[function]]
 vram = 0x80124FC0
+
+
+[[function]]
+vram = 0x80124E30
+
+[[function]]
+vram = 0x8012B4A0
+
+[[function]]
+vram = 0x801257C0

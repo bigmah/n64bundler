@@ -92,6 +92,15 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     "instead.\n",
                     report.stubbed_functions);
     }
+    if (!report.stubbed_by_name.empty()) {
+        std::printf("    %zu of those are functions a signature identified and the runtime does "
+                    "not implement,\n    so the behaviour is simply gone:",
+                    report.stubbed_by_name.size());
+        for (size_t i = 0; i < report.stubbed_by_name.size(); i++) {
+            std::printf("%s%s", i == 0 ? " " : ", ", report.stubbed_by_name[i].c_str());
+        }
+        std::printf("\n");
+    }
     if (report.split_boundaries > 0) {
         std::printf("%zu boundaries added where a call landed inside a function\n",
                     report.split_boundaries);

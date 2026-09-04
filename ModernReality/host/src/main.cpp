@@ -54,11 +54,79 @@ fs::path default_config_dir() {
 /// takes no context of its own.
 n64b_rsp_selector module_microcode = nullptr;
 
-RspUcodeFunc *select_microcode(const OSTask *task) {
-    if (module_microcode == nullptr) {
-        return nullptr;
+/// The sections the loaded module declared, for the callback below.
+const n64b_module_v1 *loaded_module = nullptr;
+
+/// Put every section where the analysis says it runs.
+///
+/// librecomp decides where a section lives by watching the game's DMAs: it
+/// emulates IPL3's copy of the first megabyte at startup and then re-places a
+/// section whenever the game reads that part of the ROM again. That is right
+/// for a project built from a decompilation, where a section's address is
+/// whatever the game loaded it to and nothing knew it in advance.
+///
+/// Here something does know it in advance. A section in a module carries the
+/// load address the analysis recovered -- for a title record, an address a
+/// person measured -- and a game that moves a segment with a plain copy rather
+/// than a DMA gives librecomp nothing to watch. Mario Builder 64 does exactly
+/// that: its second segment sits inside the megabyte IPL3 copies and then runs
+/// 0x36D0 higher than where that copy put it, so every function in it resolved
+/// to the wrong address and the first call through a pointer failed.
+///
+/// This runs after librecomp's own IPL3 emulation, so it has the last word,
+/// and a later DMA still overrides it -- which is what a real overlay needs.
+void place_sections(uint8_t *rdram, recomp_context *ctx) {
+    (void)rdram;
+    (void)ctx;
+    if (loaded_module == nullptr) {
+        return;
     }
-    return reinterpret_cast<RspUcodeFunc *>(module_microcode(task));
+    for (size_t i = 0; i < loaded_module->num_code_sections; i++) {
+        const SectionTableEntry &section = loaded_module->code_sections[i];
+        load_overlays(section.rom_addr, int32_t(section.ram_addr), section.size);
+    }
+}
+
+/// Stands in for a microcode this build cannot run.
+///
+/// Graphics tasks never reach here -- ultramodern routes those to the
+/// renderer. What is left is the audio list and the occasional JPEG or custom
+/// task, and nothing identifies which microcode a ROM uses yet, so there is
+/// nothing to run. Reporting the task and completing it is the right answer:
+/// the game gets its interrupt, carries on, and draws. Refusing takes the
+/// process down over sound.
+RspExitReason unhandled_microcode(uint8_t *rdram, uint32_t ucode_addr) {
+    (void)rdram;
+    (void)ucode_addr;
+    return RspExitReason::Broke;
+}
+
+RspUcodeFunc *select_microcode(const OSTask *task) {
+    if (module_microcode != nullptr) {
+        if (auto *found = reinterpret_cast<RspUcodeFunc *>(module_microcode(task))) {
+            return found;
+        }
+    }
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::fprintf(stderr,
+                     "note: this game submitted an RSP task of type %u that no recompiled "
+                     "microcode covers.\n"
+                     "      It is being completed without running. Graphics are unaffected; "
+                     "this is what silences the audio.\n",
+                     task != nullptr ? uint32_t(task->t.type) : 0u);
+        if (task != nullptr) {
+            std::fprintf(stderr,
+                         "      flags 0x%X ucode 0x%08X (0x%X) ucode_data 0x%08X (0x%X) "
+                         "data 0x%08X (0x%X)\n",
+                         uint32_t(task->t.flags), uint32_t(task->t.ucode),
+                         uint32_t(task->t.ucode_size), uint32_t(task->t.ucode_data),
+                         uint32_t(task->t.ucode_data_size), uint32_t(task->t.data_ptr),
+                         uint32_t(task->t.data_size));
+        }
+    }
+    return unhandled_microcode;
 }
 
 const char *rom_error_text(recomp::RomValidationError error) {
@@ -150,6 +218,7 @@ int main(int argc, char **argv) {
         });
 
     module_microcode = desc.get_rsp_microcode;
+    loaded_module = &desc;
 
     const std::u8string game_id(reinterpret_cast<const char8_t *>(desc.game_id));
 
@@ -165,6 +234,7 @@ int main(int argc, char **argv) {
     entry.is_enabled = true;
     entry.entrypoint_address = gpr(int32_t(desc.entrypoint_address));
     entry.entrypoint = desc.entrypoint;
+    entry.on_init_callback = place_sections;
     recomp::register_game(entry);
 
     // librecomp plays from its own copy of the ROM, checked against the hash

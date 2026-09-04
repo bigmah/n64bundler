@@ -108,6 +108,13 @@ struct FunctionRange {
     /// function gets named after its address, because nothing in the image
     /// says what it was called.
     std::string name;
+    /// What a signature said this function is, when the name could not be
+    /// used. The recompiler substitutes on a name it recognises, so a name the
+    /// runtime does not implement has to be withheld or the build fails to
+    /// link -- but knowing it is exactly what someone needs to judge whether
+    /// stubbing this function costs the game anything, so it is kept for the
+    /// report and never emitted.
+    std::string known_as;
     /// Whether this function drives coprocessor 0 in ways the recompiler
     /// cannot translate, and has to be stubbed. See needs_stub() for why that
     /// is the right answer and when it stops being needed.
@@ -175,6 +182,11 @@ struct AnalysisReport {
     /// body -- libultra's exception preamble is the one every game has -- and
     /// they do not divide into functions at all.
     size_t stubbed_unstructured = 0;
+
+    /// Functions that were stubbed even though a signature knew what they are,
+    /// because the runtime has no implementation to put in their place. Each
+    /// one is behaviour the game had and no longer has.
+    std::vector<std::string> stubbed_by_name;
 
     std::vector<std::string> notes;
 };

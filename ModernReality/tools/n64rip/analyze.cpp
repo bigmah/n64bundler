@@ -245,6 +245,9 @@ uint32_t skip_padding(const Rom &rom, const SectionInfo &section, uint32_t vram)
 struct Recovered {
     std::map<uint32_t, uint32_t> functions; // start -> end
     std::map<uint32_t, std::string> names;  // start -> libultra name, where known
+    /// What a signature said a function is, where the name could not be used
+    /// because the runtime has no implementation of it. Kept for the report.
+    std::map<uint32_t, std::string> known_names;
     uint32_t text_end = 0;
 };
 
@@ -255,16 +258,23 @@ struct Recovered {
 /// with a signature match. Collected once because it is wanted twice: to score
 /// the boundaries, and to protect them from being merged away.
 std::set<uint32_t> collect_call_targets(const Rom &rom, const SectionInfo &section,
-                                        uint32_t text_end) {
+                                        uint32_t text_end, const Recovered &recovered) {
     std::set<uint32_t> targets;
-    for (uint32_t vram = section.vram; vram < text_end; vram += 4) {
-        const uint32_t word = rom.word(section.rom + (vram - section.vram));
-        if ((word >> 26) != 0x03) { // jal
-            continue;
-        }
-        const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
-        if (target >= section.vram && target < text_end) {
-            targets.insert(target);
+    // Only calls inside a function the walk or the sweep validated. The gaps
+    // between them are rodata that happens to sit inside .text -- a jump table,
+    // a block of floats -- and a word there that looks like a `jal` is not one.
+    // Trusting those invents boundaries in the middle of working functions, and
+    // then a branch crossing one condemns the whole function to a stub.
+    for (const auto &[start, end] : recovered.functions) {
+        for (uint32_t vram = start; vram < end && vram < text_end; vram += 4) {
+            const uint32_t word = rom.word(section.rom + (vram - section.vram));
+            if ((word >> 26) != 0x03) { // jal
+                continue;
+            }
+            const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+            if (target >= section.vram && target < text_end) {
+                targets.insert(target);
+            }
         }
     }
     return targets;
@@ -454,6 +464,7 @@ void name_from_signatures(const Rom &rom, const SectionInfo &section,
         // drive hardware, the stub pass below catches it.
         if (provides != nullptr && provides->count(best->name) == 0) {
             report.names_without_implementations++;
+            out.known_names[vram] = best->name;
         } else {
             out.names[vram] = best->name;
             report.named_functions++;
@@ -761,7 +772,7 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
     }
 
     const std::set<uint32_t> call_targets =
-        collect_call_targets(rom, section, recovered.text_end);
+        collect_call_targets(rom, section, recovered.text_end, recovered);
 
     // A `jal` names the first instruction of a function, so a call landing in
     // the middle of one we recovered means we ran two functions together.
@@ -813,9 +824,13 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
             continue;
         }
         auto named = recovered.names.find(it->first);
-        section.functions.push_back(FunctionRange{
-            it->first, end - it->first,
-            named == recovered.names.end() ? std::string() : named->second});
+        FunctionRange function{it->first, end - it->first,
+                               named == recovered.names.end() ? std::string() : named->second};
+        auto known = recovered.known_names.find(it->first);
+        if (known != recovered.known_names.end()) {
+            function.known_as = known->second;
+        }
+        section.functions.push_back(std::move(function));
     }
     // A named function is the runtime's problem, not ours: the recompiler
     // substitutes its own implementation for every libultra name it knows. Only
@@ -831,6 +846,9 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         if (needs_stub(rom, section, function)) {
             function.stub = true;
             report.stubbed_functions++;
+            if (!function.known_as.empty()) {
+                report.stubbed_by_name.push_back(function.known_as);
+            }
         } else if (branches_escape(rom, section, final_starts, text_end_vram, function)) {
             function.stub = true;
             report.stubbed_unstructured++;
@@ -839,6 +857,52 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
 
     report.functions_found += section.functions.size();
 
+}
+
+/// Split a function wherever a call from another section lands inside it.
+///
+/// The per-section pass cannot see these: it only knows the calls made within
+/// one segment, and a game with more than one segment calls between them
+/// constantly. The boundary a cross-segment `jal` names is proved exactly the
+/// same way as any other -- a call names the first instruction of a function --
+/// and left unsplit it is a function the recompiler discovers for itself and
+/// turns into a `static_`, which cannot be named or stubbed.
+void split_at_cross_section_calls(const Rom &rom, Analysis &analysis) {
+    for (const SectionInfo &caller : analysis.sections) {
+        for (uint32_t offset = 0; offset < caller.size; offset += 4) {
+            const uint32_t word = rom.word(caller.rom + offset);
+            if ((word >> 26) != 0x03) { // jal
+                continue;
+            }
+            const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+
+            for (SectionInfo &section : analysis.sections) {
+                if (target < section.vram || target >= section.vram + section.size) {
+                    continue;
+                }
+                auto at = std::lower_bound(
+                    section.functions.begin(), section.functions.end(), target,
+                    [](const FunctionRange &f, uint32_t vram) { return f.vram < vram; });
+                if (at != section.functions.end() && at->vram == target) {
+                    break; // already a boundary
+                }
+                if (at == section.functions.begin()) {
+                    break; // before the first function
+                }
+                auto containing = std::prev(at);
+                if (containing->vram + containing->size <= target) {
+                    break; // in a gap between functions
+                }
+                FunctionRange added;
+                added.vram = target;
+                added.size = containing->vram + containing->size - target;
+                containing->size = target - containing->vram;
+                section.functions.insert(at, added);
+                analysis.report.split_boundaries++;
+                break;
+            }
+        }
+    }
 }
 
 /// Score every call in the image, once every section is known.
@@ -1241,6 +1305,7 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
         }
     }
 
+    split_at_cross_section_calls(rom, analysis);
     score_calls(rom, analysis);
     analysis.save_type_evidence = detect_save_evidence(analysis);
     if (record != nullptr && !record->save_type.empty()) {

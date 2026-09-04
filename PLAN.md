@@ -190,7 +190,7 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | `.app` packaging | done — cover art, icon, launcher holding no game data |
 | per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
 | a second title | done — Mario Builder 64 recompiles too, at 100% coverage |
-| **a game that draws a frame** | **not yet** — see below |
+| **a game that draws a frame** | **not yet** — both boot; see below |
 
 ### Where Super Mario 64 stands
 
@@ -216,10 +216,9 @@ where every boundary rule here was actually tested — Super Mario 64 was alread
 at 100% before any of them existed:
 
 ```
-457 functions recovered
-1,391 of 1,391 internal calls land on a function boundary (100.00%)
-79 boundaries added where a call landed inside a function
-5 functions the recompiler refused, stubbed and retried
+2,577 functions recovered
+8,912 of 8,912 internal calls land on a function boundary (100.00%)
+509 boundaries added where a call landed inside a function
 ```
 
 Before the splitting pass it scored 77.86%, and each of the 308 calls landing
@@ -227,22 +226,46 @@ inside a function was a place the recompiler would have invented a `static_`
 function of its own — which cannot be named, cannot be stubbed, and arrives too
 late for any check here to have looked at it.
 
-It recompiles to a 332KB module, loads into the host and starts. Then it fails
-an indirect call to an address no section covers. The interesting part is what
-that is: unlike Super Mario 64, Mario Builder 64 links against exactly the
-libultra this machine has a signature database for, so the whole boot path —
-`osPiStartDma`, `osCreateViManager`, `osViSwapBuffer`, `osSpTaskStartGo`,
-`osCreateThread` — is named and substituted, and the game gets far enough to
-start dispatching through its own tables. Its first failure was at
-`0x80124FC0`, a function nothing calls directly; one `[[function]]` line in its
-record fixed that and the next failure moved to a segment the analyser has not
-found. Finding that segment is the same job the Super Mario 64 record already
-does, and this romhack loads its code somewhere its parent does not.
+**It gets much further than Super Mario 64, because it links against exactly
+the libultra this machine has a signature database for.** Its whole public API
+is named and substituted — `osPiStartDma`, `osCreateViManager`,
+`osViSwapBuffer`, `osSpTaskStartGo`, `osCreateThread` — so it boots, brings up
+its threads, relocates its main segment, runs its game loop and submits an RSP
+task. Then it reads a function pointer out of what is plainly string data and
+stops.
 
-**That contrast is the clearest thing two titles have shown.** With the right
-libultra a ROM boots into its own code and the remaining work is finding
-segments; without it a ROM stops inside libultra and no amount of segment
-hunting helps.
+Getting it that far took a title record and two things in the host:
+
+- **The record's `main` segment.** Mario Builder 64 moves nearly all of its
+  code 0x36D0 higher than where IPL3's copy put it. Nothing in the image says
+  so; the address was found by taking every `jal` target in the region and
+  every offset that looks like a function prologue, and asking which difference
+  between them occurs most often. 756 of 1,593 targets agree on it and 75 on
+  the next best, which is not a close call.
+- **The host places sections where the analysis says, not where it sees a
+  DMA.** librecomp decides a section's address by watching the game read the
+  ROM. That is right for a decompilation, where nothing knew the address in
+  advance. Here the module carries it — and Mario Builder 64 moves its segment
+  with a plain CPU copy, which there is nothing to watch. Every function in it
+  resolved 0x36D0 low until the host said otherwise.
+- **An RSP task with no microcode is completed, not fatal.** Graphics tasks go
+  to the renderer and never reach that path; what is left is audio. Taking the
+  process down over sound is the wrong trade for a bundler.
+
+What stops it is still libultra, from the other end. 40 functions are stubbed
+because they drive hardware, and the analyser can now say what 24 of them are:
+
+```
+__osDispatchThread  __osEnqueueAndYield  __osException  __osDevMgrMain
+__osViSwapContext   __osViInit           __osSiRawStartDma
+__osPiRawStartDma   __osEPiRawStartDma   __osSpRawStartDma  ...
+```
+
+Those are libultra's internals, and a signature identified every one — the
+names are withheld only because librecomp implements the public API rather
+than these, and emitting a name it does not implement is a link error. Most
+should be unreachable once the public API is substituted. Something in that
+"most" is not.
 
 The pipeline runs end to end: drop the ROM on the window, and about ten seconds
 later Super Mario 64 is in the library with a cover, a `Play` button, and

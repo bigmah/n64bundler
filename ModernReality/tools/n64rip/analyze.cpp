@@ -581,20 +581,34 @@ bool branches_escape(const Rom &rom, const SectionInfo &section,
     const uint32_t end = function.vram + function.size;
     for (uint32_t vram = function.vram; vram < end; vram += 4) {
         const uint32_t word = rom.word(section.rom + (vram - section.vram));
-        const rabbitizer::InstructionCpu insn(word, vram);
-        if (!insn.isValid() || !insn.isBranch()) {
-            continue;
+
+        uint32_t target;
+        if ((word >> 26) == 0x02) {
+            // `j`. Rabbitizer does not call this a branch and the distinction
+            // matters here: an unconditional jump out of a function is how a
+            // compiler writes a tail call, and one that leaves the section is
+            // a tail call into a segment loaded elsewhere. The recompiler has
+            // no way to express that -- unlike a `jal`, which can fall back to
+            // the runtime's function lookup.
+            target = (vram & 0xF0000000u) | ((word & 0x03FFFFFFu) << 2);
+        } else {
+            const rabbitizer::InstructionCpu insn(word, vram);
+            if (!insn.isValid() || !insn.isBranch()) {
+                continue;
+            }
+            target = uint32_t(insn.getBranchVramGeneric());
         }
-        const uint32_t target = uint32_t(insn.getBranchVramGeneric());
         if (target >= function.vram && target < end) {
             continue;
         }
-        if (target < section.vram || target >= text_end) {
-            continue;
-        }
-        if (starts.count(target) != 0) {
+        if (starts.count(target) != 0 && target >= section.vram && target < text_end) {
             continue; // a tail call, which the recompiler handles
         }
+        // Anything else is a branch this function cannot be translated with:
+        // out of the section entirely, into data past the end of .text, or
+        // into the middle of another function. A `jal` in the same position
+        // could fall back to the runtime's function lookup; a branch has no
+        // such escape, and the recompiler stops on it.
         return true;
     }
     return false;
@@ -713,38 +727,6 @@ bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange 
     return false;
 }
 
-/// Calls out of the code we have, to somewhere in this section we have not
-/// looked at yet.
-///
-/// The sweep stops at the first stretch past known code that does not read as
-/// code, because for a section whose end is unknown that stretch is the end of
-/// it. Sometimes it is not: a compiler will park a jump table or a block of
-/// float constants between two runs of functions, and everything past it is
-/// then lost. A `jal` from code we have already validated is proof that there
-/// is a function on the far side, and that is enough to start again there.
-std::vector<uint32_t> calls_past_text(const Rom &rom, const SectionInfo &section,
-                                      const Recovered &recovered) {
-    const uint32_t section_end = section.vram + section.size;
-    std::vector<uint32_t> found;
-    std::set<uint32_t> seen;
-    for (const auto &[start, end] : recovered.functions) {
-        for (uint32_t vram = start; vram < end; vram += 4) {
-            const uint32_t word = rom.word(section.rom + (vram - section.vram));
-            if ((word >> 26) != 0x03) { // jal
-                continue;
-            }
-            const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
-            if (target < recovered.text_end || target >= section_end) {
-                continue;
-            }
-            if (recovered.functions.count(target) == 0 && seen.insert(target).second) {
-                found.push_back(target);
-            }
-        }
-    }
-    return found;
-}
-
 void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &report,
                        uint32_t entry, const n64sig::Database *signatures,
                        const RuntimeProvides *provides) {
@@ -757,30 +739,42 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         return;
     }
 
-    // Sweep, then jump whatever gap the sweep stopped at if something it found
-    // calls across it, and sweep again. Converges in two or three rounds on
-    // every image tried; the bound is there so a pathological one cannot spin.
-    for (int round = 0; round < 8; round++) {
-        sweep(rom, section, recovered, report);
-        const std::vector<uint32_t> seeds = calls_past_text(rom, section, recovered);
-        if (seeds.empty()) {
-            break;
-        }
-        const uint32_t before = recovered.text_end;
-        for (uint32_t seed : seeds) {
-            walk_reachable(rom, section, seed, recovered, report);
-        }
-        if (recovered.text_end <= before) {
-            break;
-        }
-        report.text_gaps_crossed++;
-    }
+    sweep(rom, section, recovered, report);
     if (signatures != nullptr) {
         name_from_signatures(rom, section, *signatures, provides, recovered, report);
     }
 
     const std::set<uint32_t> call_targets =
         collect_call_targets(rom, section, recovered.text_end);
+
+    // A `jal` names the first instruction of a function, so a call landing in
+    // the middle of one we recovered means we ran two functions together.
+    // Split them. Left alone the recompiler finds the same boundary while
+    // translating and invents a `static_` function at it -- which is worse,
+    // because a static cannot be named, cannot be stubbed, and is discovered
+    // too late for any of the checks here to have looked at it.
+    //
+    // This runs before branch containment on purpose. Containment is the
+    // inverse operation and it already refuses to dissolve a call target, so
+    // the two compose: split on what a call proves, merge on what a branch
+    // proves, and a boundary that both point at stays split.
+    for (uint32_t target : call_targets) {
+        if (recovered.functions.count(target) != 0) {
+            continue;
+        }
+        auto containing = recovered.functions.upper_bound(target);
+        if (containing == recovered.functions.begin()) {
+            continue;
+        }
+        --containing;
+        if (containing->second <= target) {
+            continue; // in a gap rather than inside a function
+        }
+        recovered.functions[target] = containing->second;
+        containing->second = target;
+        report.split_boundaries++;
+    }
+
     enforce_branch_containment(rom, section, recovered.text_end, call_targets, recovered, report);
 
     section.text_size = recovered.text_end - section.vram;

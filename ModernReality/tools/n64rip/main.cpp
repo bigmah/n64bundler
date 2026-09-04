@@ -92,10 +92,9 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     "instead.\n",
                     report.stubbed_functions);
     }
-    if (report.text_gaps_crossed > 0) {
-        std::printf("%zu island(s) of data inside a section were stepped over, because code on "
-                    "this side of one called code on the far side\n",
-                    report.text_gaps_crossed);
+    if (report.split_boundaries > 0) {
+        std::printf("%zu boundaries added where a call landed inside a function\n",
+                    report.split_boundaries);
     }
     if (report.merged_boundaries > 0) {
         std::printf("%zu boundaries merged where a branch crossed them\n",

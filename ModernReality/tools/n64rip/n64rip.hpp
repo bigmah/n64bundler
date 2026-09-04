@@ -164,10 +164,9 @@ struct AnalysisReport {
     /// implementation to put in the function's place. These are recompiled
     /// from the ROM like any other function.
     size_t names_without_implementations = 0;
-    /// Islands of data inside a section that the sweep stopped at and a call
-    /// from proven code carried it over. Each one is a block of functions that
-    /// would otherwise have been left out of the recompilation entirely.
-    size_t text_gaps_crossed = 0;
+    /// Boundaries created because a call landed in the middle of a function.
+    /// Each one is two functions the sweep ran together.
+    size_t split_boundaries = 0;
     /// Boundaries dissolved because a branch crossed them. Each one was a
     /// switch statement whose cases the walk mistook for separate functions.
     size_t merged_boundaries = 0;

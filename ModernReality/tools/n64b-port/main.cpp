@@ -193,6 +193,33 @@ std::string shell_quote(const std::string &value) {
     return out;
 }
 
+/// Runs a command, echoing its output and keeping a copy. Used for the
+/// recompiler, whose complaints have to be read as well as shown.
+int run_capture(const std::vector<std::string> &argv, std::string &output) {
+    std::string command;
+    for (const std::string &arg : argv) {
+        command += shell_quote(arg);
+        command += ' ';
+    }
+    command += "2>&1";
+
+    FILE *pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr) {
+        return 127;
+    }
+    char buffer[512];
+    while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        std::fputs(buffer, stdout);
+        output += buffer;
+    }
+    std::fflush(stdout);
+    const int status = pclose(pipe);
+    if (status == -1) {
+        return 127;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+
 /// Runs a command, returning its exit status. Output goes wherever ours does,
 /// so a compiler error lands in the same log as everything else.
 int run(const std::vector<std::string> &argv, bool quiet = false) {
@@ -241,6 +268,95 @@ std::string tool_revision(const fs::path &path) {
     }
     return path.filename().string() + ":" + std::to_string(size) + ":" +
            std::to_string(static_cast<long long>(time.time_since_epoch().count()));
+}
+
+// ---------------------------------------------------------------------------
+// Teaching the analysis what the recompiler will not take
+//
+// n64rip stubs the functions it can tell are untranslatable: the ones that
+// drive hardware, the ones with an instruction the recompiler has no case for,
+// the ones whose branches leave the function. It cannot predict all of them.
+// The recompiler does its own analysis -- working out where an indirect jump's
+// table is, above all -- and a function whose table it cannot find is one it
+// refuses, and there is no way to know that without asking it.
+//
+// So we ask it. A refusal names the function, and a named function can be
+// stubbed and the recompile tried again. Two or three rounds settles every ROM
+// tried, and each stub is reported, because a stubbed function is a piece of
+// the game that does nothing.
+
+/// The function names in a recompiler failure. It says the same thing three
+/// ways depending on where it gave up.
+std::vector<std::string> refused_functions(const std::string &output) {
+    static const char *const prefixes[] = {
+        "Error recompiling ",
+        "Error in recompiling ",
+        "Failed to analyze ",
+    };
+    std::vector<std::string> names;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        for (const char *prefix : prefixes) {
+            const size_t at = line.find(prefix);
+            if (at == std::string::npos) {
+                continue;
+            }
+            std::string name = line.substr(at + std::strlen(prefix));
+            // "Error in recompiling X, clearing output file"
+            const size_t comma = name.find(',');
+            if (comma != std::string::npos) {
+                name.resize(comma);
+            }
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) {
+                name.pop_back();
+            }
+            if (!name.empty() &&
+                std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(name);
+            }
+            break;
+        }
+    }
+    return names;
+}
+
+/// Rewrite a recompiler configuration with more functions stubbed.
+///
+/// The `[patches]` table is the last thing n64rip writes, which is what makes
+/// splitting the file at it safe. If that ever stops being true this has to
+/// grow a TOML parser; until then it is thirty lines instead of a dependency.
+std::string with_stubs(const std::string &config, const std::vector<std::string> &extra) {
+    std::vector<std::string> names;
+    std::string head = config;
+
+    const size_t patches = config.find("[patches]");
+    if (patches != std::string::npos) {
+        head = config.substr(0, patches);
+        const std::string tail = config.substr(patches);
+        for (size_t at = tail.find('"'); at != std::string::npos; at = tail.find('"', at + 1)) {
+            const size_t close = tail.find('"', at + 1);
+            if (close == std::string::npos) {
+                break;
+            }
+            names.push_back(tail.substr(at + 1, close - at - 1));
+            at = close;
+        }
+    }
+    for (const std::string &name : extra) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(name);
+        }
+    }
+
+    std::ostringstream out;
+    out << head;
+    out << "[patches]\nstubs = [\n";
+    for (const std::string &name : names) {
+        out << "    \"" << name << "\",\n";
+    }
+    out << "]\n";
+    return out.str();
 }
 
 // ---------------------------------------------------------------------------
@@ -442,9 +558,49 @@ int build(Options options) {
     fs::create_directories(generated, ec);
 
     event("step", "1 3 Recompiling MIPS to C");
-    if (run({options.recomp.string(), config.string()}) != 0) {
-        fail("the recompiler could not translate this ROM");
-        return 1;
+    {
+        fs::path current = config;
+        std::vector<std::string> stubbed;
+        // Eight rounds. The recompiler stops at the first function it cannot
+        // take, so a round buys exactly one of them, and eight covers every
+        // ROM tried -- Mario Builder 64 has five, all the same dispatch thunk
+        // through a table in a segment that was never loaded. A ROM that still
+        // has a new refusal after eight is one where something larger is
+        // wrong, and grinding through hundreds one at a time would hide that.
+        constexpr int kRounds = 8;
+        bool translated = false;
+        for (int round = 0; round < kRounds; round++) {
+            std::string output;
+            if (run_capture({options.recomp.string(), current.string()}, output) == 0) {
+                translated = true;
+                break;
+            }
+            const std::vector<std::string> refused = refused_functions(output);
+            if (refused.empty()) {
+                break;
+            }
+            for (const std::string &name : refused) {
+                if (std::find(stubbed.begin(), stubbed.end(), name) == stubbed.end()) {
+                    stubbed.push_back(name);
+                }
+            }
+            current = options.analysis / (id + ".recomp.stubbed.toml");
+            if (!write_file(current, with_stubs(read_file(config), stubbed))) {
+                fail("could not write the amended recompiler configuration");
+                return 1;
+            }
+            info("retry=" + std::to_string(round + 1));
+        }
+        if (!translated) {
+            fail("the recompiler could not translate this ROM");
+            return 1;
+        }
+        if (!stubbed.empty()) {
+            info("recompiler_stubs=" + std::to_string(stubbed.size()));
+            for (const std::string &name : stubbed) {
+                info("recompiler_stub=" + name);
+            }
+        }
     }
 
     event("step", "2 3 Writing the module descriptor");

@@ -28,6 +28,7 @@ add_executable(n64b-run
     src/audio.cpp
     src/input.cpp
     src/callbacks.cpp
+    src/hooks.cpp
 )
 
 target_include_directories(n64b-run PRIVATE

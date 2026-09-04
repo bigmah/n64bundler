@@ -189,6 +189,7 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | Dioxus window | done — library, live console, per-game settings |
 | `.app` packaging | done — cover art, icon, launcher holding no game data |
 | per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
+| a second title | done — Mario Builder 64 recompiles too, at 100% coverage |
 | **a game that draws a frame** | **not yet** — see below |
 
 ### Where Super Mario 64 stands
@@ -209,6 +210,24 @@ addresses both through linker symbols rather than through a DMA table, so
 nothing in the image points at them. Written down once, they are found every
 time. Without the record the same ROM recovers 3,890 functions and 1,207 calls
 leave the code.
+
+The second title is Mario Builder 64, a Super Mario 64 romhack, and it is
+where every boundary rule here was actually tested — Super Mario 64 was already
+at 100% before any of them existed:
+
+```
+457 functions recovered
+1,391 of 1,391 internal calls land on a function boundary (100.00%)
+78 boundaries added where a call landed inside a function
+5 functions the recompiler refused, stubbed and retried
+```
+
+Before the splitting pass it scored 77.86%, and each of the 308 calls landing
+inside a function was a place the recompiler would have invented a `static_`
+function of its own — which cannot be named, cannot be stubbed, and arrives too
+late for any check here to have looked at it. It recompiles to a 332KB module,
+loads into the host, starts, and stops at an indirect call to a function
+nothing in the image calls directly. That one needs a title record too.
 
 The pipeline runs end to end: drop the ROM on the window, and about ten seconds
 later Super Mario 64 is in the library with a cover, a `Play` button, and
@@ -300,8 +319,9 @@ What is actually next:
    for the result; nothing identifies which microcode a ROM uses yet, so
    `get_rsp_microcode` returns nullptr and an audio task is reported rather
    than run.
-3. **A second title.** Every number here is Super Mario 64's. The analyser has
-   been checked against one game, and one game is not a sample.
+3. **More titles.** Two is not a sample either. Everything the analyser knows
+   how to do it learned from Super Mario 64 and Mario Builder 64, and the next
+   ROM will teach it something else.
 
 ## Not in scope yet
 

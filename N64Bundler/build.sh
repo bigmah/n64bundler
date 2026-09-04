@@ -77,15 +77,26 @@ done
 # rather than as forks because there is one of them and it is small; when there
 # are enough to be worth pushing back, they become forks and this becomes
 # forks.sh, which is the road DolBundler already walked.
-step "Applying the patches to N64Recomp"
+step "Applying the patches to the vendored runtimes"
 RECOMP_SRC="$MR_SRC/vendor/N64ModernRuntime/N64Recomp"
+RUNTIME_SRC="$MR_SRC/vendor/N64ModernRuntime"
 for patch in "$HERE"/patches/*.patch; do
   [ -f "$patch" ] || continue
   name="$(basename "$patch")"
-  if git -C "$RECOMP_SRC" apply --reverse --check "$patch" >/dev/null 2>&1; then
+  # A patch names the checkout it belongs to, because there are two of them and
+  # N64Recomp is a submodule of the other: 0001-n64recomp-... applies inside
+  # N64Recomp, 0002-librecomp-... in the runtime around it.
+  case "$name" in
+    *-n64recomp-*)               target="$RECOMP_SRC" ;;
+    *-librecomp-*|*-ultramodern-*) target="$RUNTIME_SRC" ;;
+    *)
+      echo "$name does not say which checkout it applies to" >&2
+      exit 1 ;;
+  esac
+  if git -C "$target" apply --reverse --check "$patch" >/dev/null 2>&1; then
     echo "    $name is already applied"
-  elif git -C "$RECOMP_SRC" apply --check "$patch" >/dev/null 2>&1; then
-    git -C "$RECOMP_SRC" apply "$patch"
+  elif git -C "$target" apply --check "$patch" >/dev/null 2>&1; then
+    git -C "$target" apply "$patch"
     echo "    applied $name"
   else
     echo "$name applies neither way; the submodule pin has moved under it" >&2

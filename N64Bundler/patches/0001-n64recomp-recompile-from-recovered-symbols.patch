@@ -138,10 +138,15 @@ index f79580f..1cda37f 100644
                         "void {}(uint8_t* rdram, recomp_context* ctx);\n", func.name);
          }
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
-index c228433..d577344 100644
+index c228433..1d3e153 100644
 --- a/src/recompilation.cpp
 +++ b/src/recompilation.cpp
-@@ -305,6 +305,15 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -1,3 +1,4 @@
++#include <array>
+ #include <vector>
+ #include <set>
+ #include <unordered_set>
+@@ -305,6 +306,15 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
  
                  switch (jal_result) {
                      case JalResolutionResult::NoMatch:
@@ -157,20 +162,30 @@ index c228433..d577344 100644
                          fmt::print(stderr, "No function found for jal target: 0x{:08X}\n", target_func_vram);
                          return false;
                      case JalResolutionResult::Match:
-@@ -356,6 +365,48 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -356,6 +366,135 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
          return true;
      };
  
-+    // True when this branch closes a loop whose body only reads memory.
++    // True when this branch closes a loop that cannot end on its own.
 +    //
-+    // Such a loop cannot end on its own: nothing in it changes an address or a
-+    // register the next iteration depends on, so it runs until something
-+    // outside the thread writes the word being read. On the console that is an
-+    // interrupt, which preempts the thread and lets a higher-priority one run.
-+    // A recompiled game has no interrupts: the runtime only gets to schedule
-+    // when the game calls into it, and a loop like this never does, so the
-+    // thread that would write the word never runs and the console model
-+    // deadlocks. Yielding here is what the interrupt did.
++    // Such a loop computes nothing that survives to the next iteration: every
++    // value it uses comes either from a register it never writes or from a word
++    // it loads, so the only thing that can change its outcome is another thread
++    // writing that word. On the console that is an interrupt, which preempts
++    // the thread and lets a higher-priority one run. A recompiled game has no
++    // interrupts: the runtime only gets to schedule when the game calls into
++    // it, and a loop like this never does, so the thread that would write the
++    // word never runs and the console model deadlocks. Yielding here is what
++    // the interrupt did.
++    //
++    // What separates one of these from an ordinary counting loop is a
++    // loop-carried register. `while (p != end) p++` reads `p` before it writes
++    // it, and what it reads is what the last iteration computed, so the loop
++    // moves on by itself and must not yield. A spin reads only registers it
++    // never writes, or ones a load filled from memory -- and a load carrying a
++    // value across is the whole point, since memory is where the answer comes
++    // from. So: walk one iteration, and reject the loop if a register it reads
++    // before defining is one that anything other than a load writes.
 +    auto closes_a_spin_loop = [&instructions, instr_index, instr_vram](uint32_t branch_target) {
 +        constexpr uint32_t kLongestSpin = 4 * sizeof(uint32_t);
 +        if (branch_target >= instr_vram || instr_vram - branch_target > kLongestSpin) {
@@ -180,33 +195,110 @@ index c228433..d577344 100644
 +        if (back > instr_index || instr_index + 1 >= instructions.size()) {
 +            return false;
 +        }
-+        auto only_reads = [](InstrId id) {
-+            switch (id) {
++
++        // What one instruction reads and writes. A spin loop may hold only
++        // loads and register arithmetic; a store, a call, a second branch, a
++        // coprocessor access or a multiply and it is doing something else.
++        enum class Kind { None, Load, Compute };
++        struct Effect {
++            Kind kind;
++            int writes;
++            int reads[2];
++        };
++        auto effect_of = [](const rabbitizer::InstructionCpu &instr) -> Effect {
++            const int rd = (int)instr.GetO32_rd();
++            const int rs = (int)instr.GetO32_rs();
++            const int rt = (int)instr.GetO32_rt();
++            switch (instr.getUniqueId()) {
 +                case InstrId::cpu_nop:
-+                case InstrId::cpu_lb:
-+                case InstrId::cpu_lbu:
-+                case InstrId::cpu_lh:
-+                case InstrId::cpu_lhu:
-+                case InstrId::cpu_lw:
-+                case InstrId::cpu_lwu:
-+                    return true;
++                    return {Kind::Compute, 0, {0, 0}};
++                // A load's destination holds what memory held, so a use of it
++                // in the next iteration is a dependency on memory rather than
++                // on the loop's own arithmetic.
++                case InstrId::cpu_lb:  case InstrId::cpu_lbu:
++                case InstrId::cpu_lh:  case InstrId::cpu_lhu:
++                case InstrId::cpu_lw:  case InstrId::cpu_lwu:
++                    return {Kind::Load, rt, {rs, 0}};
++                case InstrId::cpu_add:  case InstrId::cpu_addu:
++                case InstrId::cpu_sub:  case InstrId::cpu_subu:
++                case InstrId::cpu_and:  case InstrId::cpu_or:
++                case InstrId::cpu_xor:  case InstrId::cpu_nor:
++                case InstrId::cpu_slt:  case InstrId::cpu_sltu:
++                case InstrId::cpu_sllv: case InstrId::cpu_srlv:
++                case InstrId::cpu_srav:
++                    return {Kind::Compute, rd, {rs, rt}};
++                case InstrId::cpu_sll: case InstrId::cpu_srl: case InstrId::cpu_sra:
++                    return {Kind::Compute, rd, {rt, 0}};
++                case InstrId::cpu_addi: case InstrId::cpu_addiu:
++                case InstrId::cpu_andi: case InstrId::cpu_ori:
++                case InstrId::cpu_xori: case InstrId::cpu_slti:
++                case InstrId::cpu_sltiu:
++                    return {Kind::Compute, rt, {rs, 0}};
++                case InstrId::cpu_lui:
++                    return {Kind::Compute, rt, {0, 0}};
 +                default:
-+                    return false;
++                    return {Kind::None, 0, {0, 0}};
 +            }
 +        };
-+        // Everything the loop runs: its body, and the branch's delay slot.
++
++        // One iteration in the order it runs: the body, the branch, then the
++        // branch's delay slot, whose result the next iteration sees.
++        std::vector<size_t> iteration;
 +        for (size_t i = instr_index - back; i < instr_index; i++) {
-+            if (!only_reads(instructions[i].getUniqueId())) {
++            iteration.push_back(i);
++        }
++        iteration.push_back(instr_index);
++        iteration.push_back(instr_index + 1);
++
++        std::array<bool, 32> written{};
++        std::array<bool, 32> written_by_compute{};
++        for (size_t i : iteration) {
++            if (i == instr_index) {
++                continue; // the branch writes nothing
++            }
++            const Effect effect = effect_of(instructions[i]);
++            if (effect.kind == Kind::None) {
 +                return false;
 +            }
++            if (effect.writes == 0) {
++                continue; // $zero
++            }
++            written[effect.writes] = true;
++            if (effect.kind != Kind::Load) {
++                written_by_compute[effect.writes] = true;
++            }
 +        }
-+        return only_reads(instructions[instr_index + 1].getUniqueId());
++
++        std::array<bool, 32> defined{};
++        for (size_t i : iteration) {
++            const rabbitizer::InstructionCpu &instr = instructions[i];
++            // The branch's own operands count as reads; it is what the loop
++            // decides on. Over-reading here can only reject a loop, never
++            // yield in one that did not need it.
++            Effect effect = {Kind::Compute, 0,
++                             {(int)instr.GetO32_rs(), (int)instr.GetO32_rt()}};
++            if (i != instr_index) {
++                effect = effect_of(instr);
++            }
++            for (int source : effect.reads) {
++                if (source == 0 || !written[source] || defined[source]) {
++                    continue;
++                }
++                if (written_by_compute[source]) {
++                    return false;
++                }
++            }
++            if (i != instr_index && effect.writes != 0) {
++                defined[effect.writes] = true;
++            }
++        }
++        return true;
 +    };
 +
      auto print_branch = [&](uint32_t branch_target) {
          // If the branch target is outside the current function, check if it can be treated as a tail call.
          if (branch_target < func.vram || branch_target >= func_vram_end) {
-@@ -381,6 +432,12 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+@@ -381,6 +520,12 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
              return false;
          }
  

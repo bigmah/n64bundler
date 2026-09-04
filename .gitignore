@@ -20,8 +20,10 @@ build-*/
 
 # The assembled app. Built by N64Bundler/build.sh, and every path inside it is
 # absolute to whoever built it, so a committed copy would be wrong on any other
-# machine.
+# machine. The pipeline's copy of the toolchain paths is absolute for the same
+# reason.
 N64Bundler/N64Bundler.app/
+N64Bundler/src/toolchain.conf
 
 # Scratch space used while bringing the stack up.
 .research/

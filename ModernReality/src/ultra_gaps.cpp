@@ -131,3 +131,202 @@ extern "C" void spin_wait(uint8_t *rdram, recomp_context *ctx) {
     (void)ctx;
     yield_self_1ms(rdram);
 }
+
+// --- the translation lookaside buffer ----------------------------------------
+//
+// librecomp holds the console's memory as one flat array indexed by
+// `virtual address - 0x80000000`, so a translated load reaches it with no
+// lookup at all. That is right for every address a game normally uses: KSEG0
+// and KSEG1 are fixed windows onto physical memory, and subtracting a constant
+// is exactly what the hardware does with them.
+//
+// The TLB is the one thing it cannot express. A mapped address is in KUSEG,
+// which the same subtraction sends to `rdram + address + 0x80000000` -- inside
+// the four gigabytes librecomp reserves, but reserved rather than mapped, so
+// the first read of one takes the process down.
+//
+// Super Mario 64 needs it. Its goddard segment -- the Mario head you drag
+// around on the file select screen -- reads its display data through the TLB:
+// the loader DMAs the data into the main pool, maps it in 64KB pages at
+// 0x04000000, and then everything goddard does reads it there. Unnamed and
+// unmapped, the game reaches the head and dies on the first word of it.
+//
+// What a TLB entry is, though, is an alias: two addresses, one page of memory.
+// `mach_vm_remap` makes exactly that, so an entry becomes a remap of the pages
+// it names onto the address the flat array gives its virtual address. The game
+// then reads and writes the same bytes through either address, and the RDP,
+// which only ever sees physical addresses, sees the writes too.
+
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <cstdio>
+
+namespace {
+
+/// Where librecomp's flat memory puts a virtual address.
+///
+/// The same arithmetic `MEM_W` does, and it has to stay the same arithmetic:
+/// this maps the page that a translated load will read.
+uint8_t *flat_address(uint8_t *rdram, uint32_t virtual_address) {
+    return rdram + (uint64_t)(int64_t)(int32_t)virtual_address - 0xFFFFFFFF80000000ull;
+}
+
+/// One TLB entry's two pages, as the console numbers them.
+struct TlbEntry {
+    uint32_t vaddr;     ///< the first page's virtual address
+    uint32_t physical;  ///< the first page's physical address, or kUnmapped
+    uint32_t page_size; ///< bytes in one of the two pages
+};
+
+constexpr uint32_t kUnmapped = 0xFFFFFFFFu;
+constexpr size_t kTlbEntries = 32;
+TlbEntry tlb[kTlbEntries];
+
+/// Said once, because a game that maps a page this cannot alias will map
+/// hundreds of them.
+void complain_once(const char *why) {
+    static bool said = false;
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "note: a TLB page could not be mapped (%s). A game that reads its "
+                             "data through the TLB will stop here.\n",
+                     why);
+    }
+}
+
+/// Alias `bytes` of memory at `physical` onto where `vaddr` lands in the flat
+/// map. Both addresses and the length have to be whole host pages, which on
+/// this machine are 16KB; every page size libultra offers except its smallest
+/// is a multiple of that.
+void map_page(uint8_t *rdram, uint32_t vaddr, uint32_t physical, uint32_t bytes) {
+    const size_t page = size_t(::getpagesize());
+    if ((vaddr & 0x80000000u) != 0) {
+        // Only KUSEG is ever translated, and that matters here rather than
+        // being pedantry: a KSEG0 address lands inside the memory librecomp
+        // committed for RDRAM, and replacing a mapping there would take the
+        // console's own memory away.
+        complain_once("it is not a user-space address");
+        return;
+    }
+    if ((vaddr % page) != 0 || (physical % page) != 0 || (bytes % page) != 0) {
+        complain_once("it is smaller than a host page, or not aligned to one");
+        return;
+    }
+    mach_vm_address_t target = mach_vm_address_t(flat_address(rdram, vaddr));
+    vm_prot_t current = VM_PROT_READ | VM_PROT_WRITE;
+    vm_prot_t maximum = VM_PROT_READ | VM_PROT_WRITE;
+    const kern_return_t remapped = mach_vm_remap(
+        mach_task_self(), &target, bytes, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+        mach_vm_address_t(rdram + physical), /*copy=*/FALSE, &current, &maximum, VM_INHERIT_SHARE);
+    if (remapped != KERN_SUCCESS) {
+        complain_once("the alias was refused");
+        return;
+    }
+    // The remap carries the source's protection over, but says so through an
+    // out parameter rather than promising it, so ask for what is wanted.
+    if (mach_vm_protect(mach_task_self(), target, bytes, FALSE,
+                        VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+        complain_once("the alias could not be made writable");
+    }
+}
+
+/// Put an address range back the way librecomp reserved it: present, so the
+/// next mapping can overwrite it, and inaccessible, so a read of an unmapped
+/// address faults the way the console would.
+void unmap_page(uint8_t *rdram, uint32_t vaddr, uint32_t bytes) {
+    if ((vaddr & 0x80000000u) != 0) {
+        return;
+    }
+    void *at = flat_address(rdram, vaddr);
+    (void)::mmap(at, bytes, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
+}
+
+void forget(uint8_t *rdram, size_t index) {
+    TlbEntry &entry = tlb[index];
+    if (entry.page_size == 0) {
+        return;
+    }
+    if (entry.physical != kUnmapped) {
+        unmap_page(rdram, entry.vaddr, entry.page_size * 2);
+    }
+    entry = TlbEntry{};
+}
+
+/// The page size a PageMask register value means.
+///
+/// The mask holds one bit per 4KB above the first, from bit 13 up, so
+/// 0x0001E000 is four of them plus the first: 64KB, which is what Super Mario
+/// 64 asks for.
+uint32_t page_size_from_mask(uint32_t mask) {
+    return 0x1000u * ((mask >> 13) + 1u);
+}
+
+} // namespace
+
+/// `osMapTLB(index, pagemask, vaddr, lo0, lo1, asid)`.
+///
+/// The two physical addresses are the pair of pages the entry covers, low one
+/// first, and either may be -1 for "this half is not mapped". The ASID is
+/// ignored: nothing here runs two address spaces.
+extern "C" void osMapTLB_recomp(uint8_t *rdram, recomp_context *ctx) {
+    const int32_t index = int32_t(ctx->r4);
+    const uint32_t page_size = page_size_from_mask(uint32_t(ctx->r5));
+    const uint32_t vaddr = uint32_t(ctx->r6) & ~(page_size * 2u - 1u);
+    const uint32_t lo0 = uint32_t(ctx->r7);
+    const uint32_t lo1 = uint32_t(MEM_W(0x10, ctx->r29));
+    if (index < 0 || size_t(index) >= kTlbEntries) {
+        return;
+    }
+    forget(rdram, size_t(index));
+    tlb[index] = TlbEntry{vaddr, lo0, page_size};
+    if (lo0 != kUnmapped) {
+        map_page(rdram, vaddr, lo0, page_size);
+    }
+    if (lo1 != kUnmapped) {
+        map_page(rdram, vaddr + page_size, lo1, page_size);
+    }
+}
+
+/// `osUnmapTLB(index)`.
+extern "C" void osUnmapTLB_recomp(uint8_t *rdram, recomp_context *ctx) {
+    const int32_t index = int32_t(ctx->r4);
+    if (index >= 0 && size_t(index) < kTlbEntries) {
+        forget(rdram, size_t(index));
+    }
+}
+
+extern "C" void osUnmapTLBAll_recomp(uint8_t *rdram, recomp_context *ctx) {
+    (void)ctx;
+    for (size_t index = 0; index < kTlbEntries; index++) {
+        forget(rdram, index);
+    }
+}
+
+/// `osSetTLBASID(asid)`. One address space, so there is nothing to set.
+extern "C" void osSetTLBASID_recomp(uint8_t *rdram, recomp_context *ctx) {
+    (void)rdram;
+    (void)ctx;
+}
+
+/// `__osProbeTLB(vaddr)` -- the physical address behind a mapped one, or -1.
+///
+/// This is what `osVirtualToPhysical` falls back on for an address that is in
+/// neither fixed window, and therefore what decides where the RDP reads a
+/// segment a game placed in mapped memory.
+extern "C" void __osProbeTLB_recomp(uint8_t *rdram, recomp_context *ctx) {
+    (void)rdram;
+    const uint32_t address = uint32_t(ctx->r4);
+    ctx->r2 = int32_t(-1);
+    for (const TlbEntry &entry : tlb) {
+        if (entry.page_size == 0 || entry.physical == kUnmapped) {
+            continue;
+        }
+        const uint32_t span = entry.page_size * 2u;
+        if (address >= entry.vaddr && address < entry.vaddr + span) {
+            ctx->r2 = int32_t(entry.physical + (address - entry.vaddr));
+            return;
+        }
+    }
+}

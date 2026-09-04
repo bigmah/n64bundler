@@ -117,3 +117,123 @@ name = "osViSwapBuffer"
 [[function]]
 vram = 0x80322A5C
 name = "osSpTaskLoad"
+
+# The serial interface: the controllers and the save chip.
+#
+# Everything below reaches the console through the SI, and every one of them
+# ends in the same place -- a PIF request handed to the hardware, then a block
+# on the message queue the SI interrupt would have posted to. There is no SI
+# and there is no interrupt, so unnamed each of these is where the game stops
+# for good. This is what Super Mario 64 was doing when its screen stayed black:
+# the game loop thread reached `init_controllers` and never came back out.
+
+# Guarded by a one-shot flag it sets on entry, reads the counter, and if less
+# than 500000 -- the half-second libultra waits for the controllers to settle
+# after a cold boot -- sets a timer and blocks. Then it packs a PIF request and
+# hands it to the serial interface. Three arguments: a queue, a bit pattern,
+# and an array of status words.
+[[function]]
+vram = 0x80323CC0
+name = "osContInit"
+
+# Takes the access semaphore, packs a read request unless the last poll already
+# was one, starts the serial DMA, and blocks on the caller's queue. This is
+# every frame's controller read.
+[[function]]
+vram = 0x80323A60
+name = "osContStartReadData"
+
+# Unpacks the 64 bytes the PIF sent back into an OSContPad each: the button
+# halfword, then the stick's two signed bytes, and the receive-size nibbles
+# turned into the error byte.
+[[function]]
+vram = 0x80323B24
+name = "osContGetReadData"
+
+# Takes the access semaphore, asks the save chip for its status, and reports
+# whether the answer had bit 0x8000 set -- which is how libultra says "there is
+# an EEPROM here". Super Mario 64 keeps the result in a byte it consults before
+# every save, so an unnamed one is a game that cannot write a file even once
+# the block is gone.
+[[function]]
+vram = 0x80324080
+name = "osEepromProbe"
+
+# The pair that reads and writes a run of bytes across block boundaries. Both
+# reject an address of 64 or more -- the 4kbit chip's block count -- and then
+# loop over the single-block call. They differ only in which one they loop.
+[[function]]
+vram = 0x80324690
+name = "osEepromLongRead"
+
+[[function]]
+vram = 0x803247D0
+name = "osEepromLongWrite"
+
+# The single-block calls the two above loop over. Nothing in the game calls
+# them directly; they are named so that the pair's own callers inside libultra
+# cannot reach the hardware either.
+[[function]]
+vram = 0x80329150
+name = "osEepromRead"
+
+[[function]]
+vram = 0x80328AF0
+name = "osEepromWrite"
+
+# Writes the DRAM address and the PIF read or write register, having first
+# asked whether the device is busy. Mario Builder 64 needed this one by name
+# for the same reason; Super Mario 64 reaches it through the four calls above,
+# so naming those is enough -- but a game that drives the SI itself would not,
+# and it costs nothing to be sure.
+[[function]]
+vram = 0x80328960
+name = "__osSiRawStartDma"
+
+# The audio interface.
+#
+# Writes the DAC rate and bit rate registers from a frequency, and turns the
+# interface on. Called once, from the audio thread's initialisation.
+[[function]]
+vram = 0x80325970
+name = "osAiSetFrequency"
+
+# Writes a physical address and a length to the audio interface, having checked
+# the status register for room. This is the call that would hand a frame of
+# samples to the console's DAC, and the one the host has to see to play any.
+[[function]]
+vram = 0x80325DB0
+name = "osAiSetNextBuffer"
+
+# Reads the audio interface's status register and returns it. Three
+# instructions, but with a stack frame, so `n64sig`'s short-function rule
+# does not reach it and neither does its tiny-accessor list.
+[[function]]
+vram = 0x80329750
+name = "osAiGetStatus"
+
+# The rest of the console's devices.
+#
+# Starts the thread that serialises cartridge access. `osPiStartDma` returns -1
+# when it was never started, and every cartridge read in the game goes through
+# `osPiStartDma`. Named by its call site: `thread1_idle` calls it with priority
+# 150, a queue, a buffer and a count of 32, which is the manager's signature
+# exactly.
+[[function]]
+vram = 0x80323570
+name = "osCreatePiManager"
+
+# Reads the signal processor's status, reports whether the task yielded, and
+# folds that answer back into the task's own flags word. The game asks after
+# every graphics task.
+[[function]]
+vram = 0x80322D70
+name = "osSpTaskYielded"
+
+# Walks all thirty-two TLB entries writing an unmapped one over each. Nothing
+# here maps the TLB, so the runtime's version is the no-op it should be; the
+# reason to name it is that unnamed it is stubbed for its COP0, and a stub
+# returns whatever was in v0.
+[[function]]
+vram = 0x803224A0
+name = "osUnmapTLBAll"

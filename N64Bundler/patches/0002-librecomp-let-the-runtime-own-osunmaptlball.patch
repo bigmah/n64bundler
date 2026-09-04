@@ -1,0 +1,21 @@
+diff --git a/librecomp/src/ultra_stubs.cpp b/librecomp/src/ultra_stubs.cpp
+index 9dd263b..243d40a 100644
+--- a/librecomp/src/ultra_stubs.cpp
++++ b/librecomp/src/ultra_stubs.cpp
+@@ -2,10 +2,12 @@
+ #include <ultramodern/ultramodern.hpp>
+ #include "recomp.h"
+ 
+-// None of these functions need to be reimplemented, so stub them out
+-extern "C" void osUnmapTLBAll_recomp(uint8_t * rdram, recomp_context * ctx) {
+-    // TODO this will need to be implemented in the future for any games that actually use the TLB
+-}
++// None of these functions need to be reimplemented, so stub them out.
++//
++// osUnmapTLBAll was one of them, and is not any more: a runtime that maps the
++// TLB has to be able to unmap it too, so whoever implements osMapTLB owns
++// osUnmapTLBAll as well and defines it alongside. Leaving the stub here made
++// the two collide at link time.
+ 
+ extern "C" void osVoiceInit_recomp(uint8_t * rdram, recomp_context * ctx) {
+     ctx->r2 = 11; // CONT_ERR_DEVICE

@@ -17,7 +17,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <filesystem>
+#include <sys/mman.h>
 #include <string>
 #include <vector>
 
@@ -75,9 +77,39 @@ const n64b_module_v1 *loaded_module = nullptr;
 ///
 /// This runs after librecomp's own IPL3 emulation, so it has the last word,
 /// and a later DMA still overrides it -- which is what a real overlay needs.
+/// Make the console's register window ordinary memory.
+///
+/// librecomp maps KSEG0 and nothing else, so a translated instruction that
+/// stores to the RCP at `0xA4xxxxxx` lands past the end of the mapping and
+/// takes the process down. That is why the analyser stubs every function that
+/// touches one -- and stubbing a function loses whatever else it did.
+///
+/// Backing the window with zeroed memory is better on both counts. The
+/// function runs, everything it does besides the register access is real, and
+/// the access itself reads zero and discards writes. Zero is also the useful
+/// answer: libultra's waits are "while the device is busy", and a device that
+/// is never busy is one the caller stops waiting for. The runtime models the
+/// hardware these registers belong to; nothing is meant to be read back.
+///
+/// The pages are lazily committed, so the cost is address space rather than
+/// memory: only what a game actually touches is ever backed.
+void map_register_window(uint8_t *rdram) {
+    // KSEG1, uncached, which is the only way the registers are reached:
+    // 0xA0000000 through 0xBFFFFFFF, at rdram + (address - 0x80000000).
+    constexpr size_t kFirst = 0x20000000;
+    constexpr size_t kLength = 0x20000000;
+    if (mprotect(rdram + kFirst, kLength, PROT_READ | PROT_WRITE) != 0) {
+        std::fprintf(stderr,
+                     "note: could not map the console's register window (%s). Games that reach "
+                     "a hardware register directly will stop here.\n",
+                     std::strerror(errno));
+    }
+}
+
 void place_sections(uint8_t *rdram, recomp_context *ctx) {
-    (void)rdram;
     (void)ctx;
+    map_register_window(rdram);
+    n64b::set_watch_memory(rdram);
     if (loaded_module == nullptr) {
         return;
     }

@@ -638,6 +638,101 @@ bool branches_escape(const Rom &rom, const SectionInfo &section,
     return false;
 }
 
+/// The libultra accessors that are too short to fingerprint.
+///
+/// `n64sig` will not make a signature out of a function shorter than six
+/// instructions, and it is right not to: four instructions of MIPS are not
+/// distinctive and a wrong name puts the wrong implementation in a function's
+/// place. But libultra has a handful of functions that are three instructions
+/// -- read one hardware register, return it -- and they are the ones a game
+/// calls most often. Left unnamed they are stubbed, because they touch
+/// hardware, and a stubbed function returns whatever happened to be in v0.
+/// `osGetCount` returning garbage is a game whose every timer is wrong.
+///
+/// What makes naming them safe where a short signature would not be is that
+/// the register decides it. There is exactly one libultra function that reads
+/// the audio interface's length register and returns it, and a function that
+/// does only that is that function. The name is still checked against what the
+/// runtime implements before it is used.
+struct TinyAccessor {
+    /// A hardware register address, or kCop0 plus a coprocessor 0 register.
+    uint32_t source;
+    const char *name;
+};
+
+constexpr uint32_t kCop0 = 0xC0000000u;
+
+constexpr TinyAccessor kTinyAccessors[] = {
+    {0xA4500004u, "osAiGetLength"},
+    {0xA450000Cu, "osAiGetStatus"},
+    {0xA4600010u, "osPiGetStatus"},
+    {0xA410000Cu, "osDpGetStatus"},
+    {kCop0 | 9u, "osGetCount"},   // C0_COUNT
+};
+
+/// The libultra name for a function that does nothing but read one register
+/// into v0 and return, or an empty string.
+std::string tiny_accessor_name(const Rom &rom, const SectionInfo &section,
+                               const FunctionRange &function) {
+    // Three instructions and a return; four words with the delay slot, and at
+    // most six once a compiler's padding is allowed for.
+    if (function.size < 8 || function.size > 0x18) {
+        return {};
+    }
+
+    constexpr uint32_t kJrRa = 0x03E00008u;
+    constexpr uint32_t kReturnRegister = 2; // v0
+
+    bool returns = false;
+    uint32_t source = 0;
+    size_t meaningful = 0;
+    uint32_t upper = 0;
+    bool have_upper = false;
+
+    for (uint32_t offset = 0; offset < function.size; offset += 4) {
+        const uint32_t word = rom.word(section.rom + (function.vram + offset - section.vram));
+        if (word == 0) {
+            continue; // nop, and the delay slots here are all nops
+        }
+        if (word == kJrRa) {
+            returns = true;
+            continue;
+        }
+        meaningful++;
+        if ((word >> 26) == 0x0F) { // lui
+            upper = (word & 0xFFFF) << 16;
+            have_upper = true;
+            continue;
+        }
+        if ((word >> 26) == 0x23 && ((word >> 16) & 0x1F) == kReturnRegister && have_upper) {
+            // lw v0, imm(base), where base was just built by the lui.
+            int32_t immediate = int16_t(word & 0xFFFF);
+            source = upper + uint32_t(immediate);
+            continue;
+        }
+        if ((word >> 26) == 0x10 && ((word >> 21) & 0x1F) == 0 &&
+            ((word >> 16) & 0x1F) == kReturnRegister) {
+            // mfc0 v0, rd
+            source = kCop0 | ((word >> 11) & 0x1F);
+            continue;
+        }
+        return {}; // anything else and this is not a bare accessor
+    }
+
+    // A lui and a load, or a single mfc0. More than that is a function doing
+    // something, and this is only for the ones that do nothing.
+    if (!returns || source == 0 || meaningful > 2) {
+        return {};
+    }
+
+    for (const TinyAccessor &accessor : kTinyAccessors) {
+        if (accessor.source == source) {
+            return accessor.name;
+        }
+    }
+    return {};
+}
+
 /// Does this function drive coprocessor 0 in a way the recompiler cannot
 /// translate?
 ///
@@ -665,29 +760,11 @@ bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange 
         const uint32_t vram = function.vram + offset;
         const uint32_t word = rom.word(section.rom + (vram - section.vram));
 
-        // A `lui` of an address inside the RCP's register block.
-        //
-        // Those registers are how libultra drives the hardware: the VI's
-        // current framebuffer, the AI's DMA length, the SP's task pointer, the
-        // MI's interrupt mask. None of it exists here -- the runtime
-        // reimplements every routine that would touch it -- and the addresses
-        // are not memory the runtime maps, so a store through one lands past
-        // the end of the mapping and takes the process down.
-        //
-        // The window is named exactly rather than as "anything in KSEG1",
-        // because the wider test also catches `lui $at, 0xBF80`, which is how
-        // a compiler loads -1.0f, and stubs a third of the game.
-        if ((word >> 26) == 0x0F) { // lui
-            const uint32_t immediate = word & 0xFFFF;
-            constexpr uint32_t kRcpRegistersFirst = 0xA3F0; // RDRAM registers
-            constexpr uint32_t kRcpRegistersLast = 0xA4A0;  // past the SI
-            constexpr uint32_t kUncachedRdramFirst = 0xA000;
-            constexpr uint32_t kUncachedRdramLast = 0xA080;
-            if ((immediate >= kRcpRegistersFirst && immediate <= kRcpRegistersLast) ||
-                (immediate >= kUncachedRdramFirst && immediate <= kUncachedRdramLast)) {
-                return true;
-            }
-        }
+        // The RCP's registers used to be stubbed here, because the runtime
+        // mapped no memory at their addresses and a store to one took the
+        // process down. The host now backs that window with zeroed memory, so
+        // the function runs: everything it does besides the register access is
+        // real, and the access itself reads zero and discards writes.
 
         // A 64-bit float conversion. The recompiler has no case for `trunc.l.d`
         // and its family, so a function containing one takes the build down
@@ -854,6 +931,16 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         final_starts.insert(function.vram);
     }
     for (FunctionRange &function : section.functions) {
+        if (function.name.empty()) {
+            // Before deciding a hardware routine has to be stubbed, see
+            // whether it is one of the handful too short to have a signature.
+            const std::string tiny = tiny_accessor_name(rom, section, function);
+            if (!tiny.empty() && (provides == nullptr || provides->count(tiny) != 0)) {
+                function.name = tiny;
+                report.named_functions++;
+                report.named_by_shape++;
+            }
+        }
         if (!function.name.empty()) {
             continue;
         }

@@ -73,6 +73,10 @@ void shutdown_audio();
 /// ends. Only does anything for a module built with `n64b-port --trace`.
 void install_trace(bool catch_signals);
 
+/// Where the game's memory is, so a `--watch` build can print what the watched
+/// address holds rather than only who touched it.
+void set_watch_memory(uint8_t *rdram);
+
 /// Opens whatever controllers are already plugged in. Hotplug is handled from
 /// the event pump.
 void init_input();

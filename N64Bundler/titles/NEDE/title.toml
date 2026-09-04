@@ -20,9 +20,9 @@ notes = [
 
 [[section]]
 name = "main"
-rom  = 0x026020
-vram = 0x8014CA20
-size = 0xF8000
+rom  = 0x0258E0
+vram = 0x8014C2E0
+size = 0x118460
 
 # Functions nothing calls directly, found by running the game with
 # `n64b-port --trace` and reading the address the runtime could not resolve out

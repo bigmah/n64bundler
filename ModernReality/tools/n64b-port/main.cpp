@@ -376,6 +376,8 @@ struct Options {
     /// Build the module with the recompiler's trace mode on, so the host can
     /// say which functions a game entered before it went wrong.
     bool trace = false;
+    /// A game address to report every access to, or empty. Implies --trace.
+    std::string watch;
 };
 
 /// The flags the recompiled C is built with, and why each one is here.
@@ -424,6 +426,24 @@ void n64b_trace(const char *name);
 // needs entries to reconstruct the path, so this is deliberately nothing.
 #define TRACE_RETURN() ;
 
+#ifdef N64B_WATCH
+// A watch on one game address, for the question static analysis cannot answer:
+// which function touches this global? Every 32-bit access in the recompiled
+// code goes through MEM_W, so redefining it after recomp.h has had its say is
+// enough. Slow, and only ever on in a --watch build.
+void n64b_watch(unsigned address, const char *where);
+
+static inline int *n64b_mem_w(unsigned char *rdram, long long address, const char *where) {
+    if ((unsigned)address == (unsigned)N64B_WATCH) {
+        n64b_watch((unsigned)address, where);
+    }
+    return (int *)(rdram + (address - 0xFFFFFFFF80000000ll));
+}
+
+#undef MEM_W
+#define MEM_W(offset, reg) (*n64b_mem_w(rdram, (long long)((reg) + (offset)), __func__))
+#endif
+
 #endif
 )";
 
@@ -436,6 +456,7 @@ std::string cache_key(const Options &options, const std::string &rom_hash,
     material += "|symbols=" + std::to_string(XXH3_64bits(symbols.data(), symbols.size()));
     material += "|cc=" + options.compiler;
     material += options.trace ? "|trace" : "";
+    material += "|watch=" + options.watch;
     for (const std::string &flag : compile_flags(options)) {
         material += "|" + flag;
     }
@@ -691,6 +712,9 @@ int build(Options options) {
     fs::create_directories(objects, ec);
 
     std::vector<std::string> base = compile_flags(options);
+    if (!options.watch.empty()) {
+        base.push_back("-DN64B_WATCH=" + options.watch);
+    }
     for (const std::string &include : options.includes) {
         base.push_back("-I" + include);
     }
@@ -785,7 +809,7 @@ void usage() {
                  "usage: n64b-port build --analysis <dir> --rom <rom.z64> --out <module.dylib>\n"
                  "                       [--recomp <N64Recomp>] [--cc <clang>] [--include <dir>]\n"
                  "                       [--opt <-O2>] [--jobs <n>] [--force] [--keep-c]\n"
-                 "                       [--trace]\n"
+                 "                       [--trace] [--watch <0xADDRESS>]\n"
                  "                       [--porcelain]\n");
 }
 
@@ -830,6 +854,7 @@ int main(int argc, char **argv) {
         else if (arg == "--force") options.force = true;
         else if (arg == "--keep-c") options.keep_c = true;
         else if (arg == "--trace") options.trace = true;
+        else if (arg == "--watch") { options.watch = next_arg(); options.trace = true; }
         else if (arg == "--porcelain") porcelain = true;
         else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());

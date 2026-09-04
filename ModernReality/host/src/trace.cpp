@@ -22,11 +22,76 @@
 
 namespace {
 
+/// The word the watched address holds, in the game's byte order.
+uint8_t *watched_rdram = nullptr;
+
+unsigned watch_value(unsigned address) {
+    if (watched_rdram == nullptr) {
+        return 0;
+    }
+    const uint8_t *at = watched_rdram + (address - 0x80000000u);
+    return (unsigned(at[0]) << 24) | (unsigned(at[1]) << 16) | (unsigned(at[2]) << 8) | at[3];
+}
+
+
 // Enough to see how the game got where it got, small enough to stay in cache.
 constexpr size_t kEntries = 512;
 
 const char *names[kEntries];
 std::atomic<size_t> next{0};
+
+// How often each function was entered. Keyed on the name pointer, which is a
+// string literal in the module and therefore stable and unique per function.
+// A ring shows how the game got somewhere; this shows where it is stuck.
+constexpr size_t kSlots = 8192;
+struct Count {
+    const char *name;
+    uint64_t hits;
+};
+Count counts[kSlots];
+
+void record(const char *name) {
+    size_t slot = (reinterpret_cast<uintptr_t>(name) >> 4) % kSlots;
+    for (size_t probe = 0; probe < 64; probe++) {
+        Count &entry = counts[(slot + probe) % kSlots];
+        if (entry.name == name) {
+            entry.hits++;
+            return;
+        }
+        if (entry.name == nullptr) {
+            entry.name = name;
+            entry.hits = 1;
+            return;
+        }
+    }
+}
+
+void dump_counts() {
+    Count *top[60] = {};
+    size_t found = 0;
+    for (Count &entry : counts) {
+        if (entry.name == nullptr) {
+            continue;
+        }
+        size_t at = found < 60 ? found++ : 60;
+        while (at > 0 && (at == 60 || top[at - 1]->hits < entry.hits)) {
+            if (at < 60) {
+                top[at] = top[at - 1];
+            }
+            at--;
+        }
+        if (at < 60) {
+            top[at] = &entry;
+        }
+    }
+    if (found == 0) {
+        return;
+    }
+    std::fprintf(stderr, "\n--- the functions this game spent its time in ---\n");
+    for (size_t i = 0; i < found; i++) {
+        std::fprintf(stderr, "%12llu  %s\n", (unsigned long long)top[i]->hits, top[i]->name);
+    }
+}
 
 void dump() {
     const size_t total = next.load();
@@ -42,9 +107,26 @@ void dump() {
                      (i + 1) % 6 == 0 ? "\n" : "  ");
     }
     std::fprintf(stderr, "\n");
+    dump_counts();
 }
 
 } // namespace
+
+/// Called from a module built with `--watch` every time the watched address is
+/// accessed. Each distinct function is reported once: what is wanted is the
+/// set of places that touch a global, not a log of every access.
+extern "C" void n64b_watch(unsigned address, const char *where) {
+    // The first few accesses in order, with what the address holds when each
+    // one happens. A store shows its old value, so a pointer being written and
+    // then cleared reads as the value appearing and then going back to zero --
+    // which is the shape of the bug this exists to find.
+    static size_t reported = 0;
+    if (reported++ >= 40) {
+        return;
+    }
+    std::fprintf(stderr, "watch: %2zu  0x%08X = 0x%08X, in %s\n", reported, address,
+                 watch_value(address), where);
+}
 
 /// Called from every recompiled function when the module was built with
 /// tracing. Deliberately not thread-safe beyond the atomic counter: a torn
@@ -52,6 +134,7 @@ void dump() {
 /// here would change the timing of the thing being debugged.
 extern "C" void n64b_trace(const char *name) {
     names[next.fetch_add(1, std::memory_order_relaxed) % kEntries] = name;
+    record(name);
 }
 
 /// Arrange for the buffer to be printed however the process ends. A game that
@@ -60,6 +143,11 @@ extern "C" void n64b_trace(const char *name) {
 /// takes a signal -- so all three are covered.
 namespace n64b {
 void install_trace(bool catch_signals);
+void set_watch_memory(uint8_t *rdram);
+}
+
+void n64b::set_watch_memory(uint8_t *rdram) {
+    watched_rdram = rdram;
 }
 
 void n64b::install_trace(bool catch_signals) {

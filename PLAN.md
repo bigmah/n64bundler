@@ -280,104 +280,35 @@ it could not resolve to the record" took Mario Builder 64 from dying on its
 first indirect call to running its game loop. Every one of those five was a
 function nothing calls directly.
 
-What stops it is still libultra, from the other end. 40 functions are stubbed
-because they drive hardware, and the analyser can now say what 24 of them are:
+What stops it is one message that never arrives. Its render thread does
+`osRecvMesg` on the vblank queue, sends its display list, and blocks on the
+second `osRecvMesg` forever -- which is why exactly one display list is
+submitted and `osViSwapBuffer` is never called at all. The framebuffer it would
+hand over is fine: watching `0x80266EF8` shows the game writing `0x003C3340`
+into it, correctly, early on. Finding which vblank handler was never registered
+needs the game's symbols.
 
-```
-__osDispatchThread  __osEnqueueAndYield  __osException  __osDevMgrMain
-__osViSwapContext   __osViInit           __osSiRawStartDma
-__osPiRawStartDma   __osEPiRawStartDma   __osSpRawStartDma  ...
-```
+### Two register windows and a watchpoint
 
-Those are libultra's internals, and a signature identified every one — the
-names are withheld only because librecomp implements the public API rather
-than these, and emitting a name it does not implement is a link error. Most
-should be unreachable once the public API is substituted. Something in that
-"most" is not.
+Chasing that turned up two things worth having.
 
-Where it stops is not a layout problem, and that was worth ruling out. The
-segment address is confirmed from three directions: the correlation above, the
-absence of any DMA for it in the runtime's own log, and the addresses the boot
-code builds — boot's data ends at 0x8014C2E0 and this segment's code starts at
-0x8014CA20, which is what a `.bss` hole between two segments looks like and
-exactly the 0x36D0 the load addresses differ by. What is left is a wrong value
-somewhere in the game's state, and finding it needs an instruction trace.
-N64Recomp has a `trace_mode` for precisely this and nothing here drives it yet.
+**The console's registers are ordinary memory now.** librecomp maps KSEG0 and
+nothing else, so a translated instruction storing to the RCP at `0xA4xxxxxx`
+lands past the end of the mapping and takes the process down. That is why the
+analyser used to stub every function touching one -- and stubbing a function
+loses everything else it did. The host now backs `0xA0000000`-`0xBFFFFFFF` with
+lazily committed zeroed pages, so those functions simply run: everything but
+the register access is real, the access reads zero and discards writes, and
+zero is the useful answer because libultra's waits are all "while the device is
+busy". Stubs fell from 28 to 11 on Super Mario 64 and from 38 to 10 on Mario
+Builder 64.
 
-The pipeline runs end to end: drop the ROM on the window, and about ten seconds
-later Super Mario 64 is in the library with a cover, a `Play` button, and
-optionally a `.app` in `~/Applications`. Pressing Play opens a window titled
-Super Mario 64, brings up RT64 on Metal, allocates RDRAM, loads the ROM, and
-starts the game's entry point on its own thread.
-
-**And then the screen stays black, and this is why.** The 31 stubbed functions
-are libultra, and between them they touch every register block on the machine:
-
-```
-PI 9   VI 14   SP 10   AI 8   MI 7   SI 5
-```
-
-The PI ones are the ones that matter. Super Mario 64 DMAs everything out of the
-cartridge — levels, textures, the engine segment itself — through
-`osPiStartDma`, and with the PI path stubbed the DMA never happens, the
-completion message never arrives, and the game waits on a queue forever. The
-runtime implements every one of those functions. It is only that nothing has
-told the recompiler which functions they are.
-
-### The second gap: libultra has to be named, and one archive is not enough
-
-Recovering boundaries was the first thing a bare ROM does not give us, and that
-one is solved. Names are the second, and they are what stands between this and
-a game that draws.
-
-A game built with libultra calls `osCreateThread`, `osViSwapBuffer`,
-`osPiStartDma` and two hundred others, and none of that code can run as
-recompiled MIPS: it talks to hardware that does not exist here. The runtime
-reimplements all of it — and N64Recomp already knows to substitute those
-implementations, because it carries a list of the names
-(`src/symbol_lists.cpp`, 668 lines of `reimplemented_funcs`, `ignored_funcs`
-and `renamed_funcs`). A decompilation project supplies the names from its elf
-and the substitution happens for free.
-
-`n64sig` supplies them instead, by fingerprinting the library. libultra shipped
-as a static archive, so `osCreateThread` is byte-identical in every game linked
-against the same build of it, and matching it is the problem IDA's FLIRT
-signatures solve. Each word carries a mask taken from the object file's own
-relocations, so the fields the linker filled in are ignored and the rest is
-compared exactly.
-
-**"The same build of it" is the whole difficulty.** libultra went through half
-a dozen revisions between 1996 and 2000, and a game pins whichever one its SDK
-shipped. Fingerprinted against the archive this machine has, Super Mario 64
-matches 35 functions and misses the rest — and the misses are not marginal:
-that archive's `__osDisableInt` is 28 instructions long and threads a global
-interrupt mask through, where Super Mario 64's is the eight-instruction version
-that predates it. They are the same function and share not one word.
-
-So the fix is a database built from several revisions rather than one, which is
-a matter of having the archives rather than of writing code. Failing that, a
-title record can name a function outright — that is what the `[[function]]`
-entries are for, and the addresses to fill in are the `stubbed` list `n64rip`
-writes into `<ID>.info.json`.
-
-One shortcut that looks promising and is not: the stubbed functions can be
-identified from the registers they write, and for Super Mario 64 they fall out
-cleanly — `0x803284B0` writes `PI_DRAM_ADDR`, `PI_CART_ADDR` and `PI_WR_LEN`,
-so it is `osPiRawStartDma`; `0x80325DB0` writes the AI's address and length, so
-it is `osAiSetNextBuffer`; `0x8032AE10` writes `MI_INTR_MASK`, so it is
-`osSetIntMask`. Naming them buys nothing. librecomp's `osPiRawStartDma` is
-itself a stub that puts up a message box saying the function that called it was
-not properly named, and its `osSetIntMask` is empty — which is what stubbing
-already does. The runtime substitutes at the level of the public API, and the
-public API is exactly the part that touches no registers and so cannot be
-fingerprinted this way.
-
-Until then, a function that drives hardware and has no name is stubbed rather
-than translated. That is a deliberate choice and it is the difference between a
-game that does nothing and a process that dies: libultra's own code writes to
-the RCP's registers at `0xA4xxxxxx`, the runtime maps only KSEG0, and the store
-lands past the end of the mapping. Stubbed, it is a no-op and everything else
-still runs.
+**Two libultra functions are named by shape rather than by signature.**
+`n64sig` will not fingerprint a function shorter than six instructions, and it
+is right not to. But `osAiGetLength` and `osGetCount` are three instructions --
+read one register, return it -- and the register decides which they are. Both
+games were calling `osAiGetLength` forty-five times a second and getting
+whatever was in `v0`.
 
 ## Roadmap
 

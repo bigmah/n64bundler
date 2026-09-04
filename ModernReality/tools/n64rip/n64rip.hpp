@@ -169,6 +169,10 @@ struct AnalysisReport {
     /// Signature matches that landed somewhere the walk had not identified as
     /// a function at all.
     size_t named_new_boundaries = 0;
+    /// Functions named by their shape rather than by a signature: the libultra
+    /// accessors that are three instructions long and so cannot be
+    /// fingerprinted, but are decided by the register they read.
+    size_t named_by_shape = 0;
     /// Functions stubbed because they drive hardware -- coprocessor 0, or the
     /// RCP's registers -- and no signature named them. Each one is a place a
     /// wider signature database would do better: with a name, the runtime's

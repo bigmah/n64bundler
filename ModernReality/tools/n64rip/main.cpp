@@ -78,6 +78,11 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     "the walk had not found\n",
                     report.named_functions, report.named_new_boundaries);
     }
+    if (report.named_by_shape > 0) {
+        std::printf("%zu of them by shape rather than by signature: libultra accessors too short "
+                    "to fingerprint,\n    named by the hardware register they read\n",
+                    report.named_by_shape);
+    }
     if (report.names_without_implementations > 0) {
         std::printf("%zu signature matches were left nameless: the runtime has no "
                     "implementation to stand in for them\n",

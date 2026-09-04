@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Mario Builder 64 - what following calls cannot find.
+#
+# Measurements of a cartridge: addresses and a hash. No game data.
+#
+# A function nothing calls directly is invisible to this analysis: the game
+# reaches it through a table, so no `jal` points at it and neither the walk nor
+# the sweep has any reason to split the function it sits inside. The first sign
+# of one is the runtime failing an indirect call to an address that was never
+# recovered, and the address it names is the line to add here.
+
+[title]
+game_id = "NEDE"
+name = "Mario Builder 64"
+rom_hash = "d82b295c5a4d30f5"
+notes = [
+    "boots as far as an indirect call into a segment this record does not yet describe; see PLAN.md",
+]
+
+[[function]]
+vram = 0x80124FC0

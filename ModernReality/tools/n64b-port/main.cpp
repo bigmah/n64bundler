@@ -567,7 +567,7 @@ int build(Options options) {
         // through a table in a segment that was never loaded. A ROM that still
         // has a new refusal after eight is one where something larger is
         // wrong, and grinding through hundreds one at a time would hide that.
-        constexpr int kRounds = 8;
+        constexpr int kRounds = 32;
         bool translated = false;
         for (int round = 0; round < kRounds; round++) {
             std::string output;

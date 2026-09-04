@@ -218,16 +218,31 @@ at 100% before any of them existed:
 ```
 457 functions recovered
 1,391 of 1,391 internal calls land on a function boundary (100.00%)
-78 boundaries added where a call landed inside a function
+79 boundaries added where a call landed inside a function
 5 functions the recompiler refused, stubbed and retried
 ```
 
 Before the splitting pass it scored 77.86%, and each of the 308 calls landing
 inside a function was a place the recompiler would have invented a `static_`
 function of its own — which cannot be named, cannot be stubbed, and arrives too
-late for any check here to have looked at it. It recompiles to a 332KB module,
-loads into the host, starts, and stops at an indirect call to a function
-nothing in the image calls directly. That one needs a title record too.
+late for any check here to have looked at it.
+
+It recompiles to a 332KB module, loads into the host and starts. Then it fails
+an indirect call to an address no section covers. The interesting part is what
+that is: unlike Super Mario 64, Mario Builder 64 links against exactly the
+libultra this machine has a signature database for, so the whole boot path —
+`osPiStartDma`, `osCreateViManager`, `osViSwapBuffer`, `osSpTaskStartGo`,
+`osCreateThread` — is named and substituted, and the game gets far enough to
+start dispatching through its own tables. Its first failure was at
+`0x80124FC0`, a function nothing calls directly; one `[[function]]` line in its
+record fixed that and the next failure moved to a segment the analyser has not
+found. Finding that segment is the same job the Super Mario 64 record already
+does, and this romhack loads its code somewhere its parent does not.
+
+**That contrast is the clearest thing two titles have shown.** With the right
+libultra a ROM boots into its own code and the remaining work is finding
+segments; without it a ROM stops inside libultra and no amount of segment
+hunting helps.
 
 The pipeline runs end to end: drop the ROM on the window, and about ten seconds
 later Super Mario 64 is in the library with a cover, a `Play` button, and

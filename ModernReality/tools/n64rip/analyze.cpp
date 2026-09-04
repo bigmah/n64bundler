@@ -729,11 +729,27 @@ bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange 
 
 void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &report,
                        uint32_t entry, const n64sig::Database *signatures,
-                       const RuntimeProvides *provides) {
+                       const RuntimeProvides *provides,
+                       const std::vector<uint32_t> *extra_entries = nullptr) {
     report.words_scanned += section.size / 4;
 
     Recovered recovered;
     walk_reachable(rom, section, entry, recovered, report);
+    // Calls into this segment from code already recovered elsewhere. Each one
+    // is a `jal`, so each one names a function outright, and following them is
+    // what makes a segment reachable at all: an overlay's entry point is not
+    // its first byte, and the code that calls into it is in another section.
+    //
+    // This is also what gets the sweep past a block of rodata in the middle of
+    // a segment. The sweep stops at the first stretch past known code that
+    // does not read as code; a call from outside proves there is more code
+    // beyond it, and unlike a guess, a walk from that address either validates
+    // as a whole function or is discarded.
+    if (extra_entries != nullptr) {
+        for (uint32_t seed : *extra_entries) {
+            walk_reachable(rom, section, seed, recovered, report);
+        }
+    }
     if (recovered.functions.empty()) {
         report.notes.push_back("no code was reachable from the entry point of " + section.name);
         return;
@@ -1090,16 +1106,33 @@ void apply_function_records(Analysis &analysis, const TitleRecord &record) {
             }
 
             if (at == section.functions.end()) {
+                // A boundary the analysis missed, which in practice means a
+                // function nothing calls directly -- reached through a table,
+                // and so invisible to anything that follows calls. Splitting
+                // the function that covers it is what the analysis would have
+                // done had a `jal` pointed here, so it is done the same way:
+                // the predecessor ends where this one starts, and this one
+                // runs to where the predecessor used to.
+                auto containing = std::upper_bound(
+                    section.functions.begin(), section.functions.end(), correction.vram,
+                    [](uint32_t vram, const FunctionRange &f) { return vram < f.vram; });
+
                 FunctionRange added = correction;
+                if (containing != section.functions.begin()) {
+                    auto previous = std::prev(containing);
+                    const uint32_t previous_end = previous->vram + previous->size;
+                    if (previous_end > correction.vram) {
+                        if (added.size == UINT32_MAX) {
+                            added.size = previous_end - correction.vram;
+                        }
+                        previous->size = correction.vram - previous->vram;
+                    }
+                }
                 if (added.size == UINT32_MAX) {
                     added.size = 4;
                 }
-                section.functions.insert(
-                    std::upper_bound(section.functions.begin(), section.functions.end(), added,
-                                     [](const FunctionRange &a, const FunctionRange &b) {
-                                         return a.vram < b.vram;
-                                     }),
-                    added);
+                section.functions.insert(containing, added);
+                analysis.report.split_boundaries++;
             } else {
                 if (correction.size != UINT32_MAX) {
                     at->size = correction.size;
@@ -1161,10 +1194,30 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
 
             SectionInfo section = recorded;
             if (section.functions.empty()) {
+                // Every call from the sections already recovered that lands in
+                // this one. The record says where the segment is; these say
+                // where its functions are.
+                std::vector<uint32_t> entries;
+                for (const SectionInfo &known : analysis.sections) {
+                    for (uint32_t offset = 0; offset < known.size; offset += 4) {
+                        const uint32_t word = rom.word(known.rom + offset);
+                        if ((word >> 26) != 0x03) { // jal
+                            continue;
+                        }
+                        const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+                        if (target >= section.vram && target < section.vram + section.size) {
+                            entries.push_back(target);
+                        }
+                    }
+                }
+                std::sort(entries.begin(), entries.end());
+                entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+
                 // The usual case: the record says where the segment is and the
                 // sweep says what is in it, which is the division of labour the
                 // whole design is built around.
-                recover_functions(rom, section, analysis.report, section.vram, signatures, provides);
+                recover_functions(rom, section, analysis.report, section.vram, signatures, provides,
+                                  &entries);
                 if (section.text_size > 0) {
                     section.size = section.text_size;
                 }

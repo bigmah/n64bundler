@@ -69,6 +69,10 @@ ultramodern::threads::callbacks_t threads_callbacks();
 void init_audio();
 void shutdown_audio();
 
+/// Print the last functions a game entered when the process ends, however it
+/// ends. Only does anything for a module built with `n64b-port --trace`.
+void install_trace(bool catch_signals);
+
 /// Opens whatever controllers are already plugged in. Hotplug is handled from
 /// the event pump.
 void init_input();

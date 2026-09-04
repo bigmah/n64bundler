@@ -29,6 +29,7 @@ add_executable(n64b-run
     src/input.cpp
     src/callbacks.cpp
     src/hooks.cpp
+    src/trace.cpp
 )
 
 target_include_directories(n64b-run PRIVATE

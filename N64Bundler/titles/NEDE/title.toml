@@ -36,3 +36,18 @@ vram = 0x8012B4A0
 
 [[function]]
 vram = 0x801257C0
+
+[[function]]
+vram = 0x801836C0
+
+[[function]]
+vram = 0x8013DBC0
+
+[[function]]
+vram = 0x8013F690
+
+[[function]]
+vram = 0x8013EAA0
+
+[[function]]
+vram = 0x8013FC40

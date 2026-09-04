@@ -373,6 +373,9 @@ struct Options {
     unsigned jobs = 0;
     bool force = false;
     bool keep_c = false;
+    /// Build the module with the recompiler's trace mode on, so the host can
+    /// say which functions a game entered before it went wrong.
+    bool trace = false;
 };
 
 /// The flags the recompiled C is built with, and why each one is here.
@@ -402,6 +405,28 @@ std::vector<std::string> compile_flags(const Options &options) {
     };
 }
 
+/// In trace mode the recompiler puts `#include "trace.h"` at the top of every
+/// generated file and `TRACE_ENTRY()` at the top of every function, and leaves
+/// the header to the project. This is that header.
+constexpr const char *kTraceHeader = R"(// Written by n64b-port for --trace.
+//
+// The recompiler calls this at the top of every function it emits. The host
+// keeps a ring buffer of the last few hundred and prints it when the process
+// ends, however it ends -- which is how you find the function that went wrong
+// several thousand calls before anything noticed.
+#ifndef N64B_TRACE_H
+#define N64B_TRACE_H
+
+void n64b_trace(const char *name);
+
+#define TRACE_ENTRY() n64b_trace(__func__);
+// The recompiler emits one of these before every return. The ring buffer only
+// needs entries to reconstruct the path, so this is deliberately nothing.
+#define TRACE_RETURN() ;
+
+#endif
+)";
+
 std::string cache_key(const Options &options, const std::string &rom_hash,
                       const std::string &symbols) {
     std::string material;
@@ -410,6 +435,7 @@ std::string cache_key(const Options &options, const std::string &rom_hash,
     material += "|recomp=" + tool_revision(options.recomp);
     material += "|symbols=" + std::to_string(XXH3_64bits(symbols.data(), symbols.size()));
     material += "|cc=" + options.compiler;
+    material += options.trace ? "|trace" : "";
     for (const std::string &flag : compile_flags(options)) {
         material += "|" + flag;
     }
@@ -559,7 +585,24 @@ int build(Options options) {
 
     event("step", "1 3 Recompiling MIPS to C");
     {
-        fs::path current = config;
+        // What every round starts from. With tracing on that is a copy of the
+        // analyser's configuration with trace_mode set, and the stub rounds
+        // below have to amend *that* -- amending the original would silently
+        // drop the tracing the moment one function had to be stubbed.
+        fs::path base = config;
+        if (options.trace) {
+            std::string traced = read_file(config);
+            const size_t input = traced.find("[input]\n");
+            if (input != std::string::npos) {
+                traced.insert(input + 8, "trace_mode = true\n");
+            }
+            base = options.analysis / (id + ".recomp.traced.toml");
+            if (!write_file(base, traced)) {
+                fail("could not write the traced recompiler configuration");
+                return 1;
+            }
+        }
+        fs::path current = base;
         std::vector<std::string> stubbed;
         // Eight rounds. The recompiler stops at the first function it cannot
         // take, so a round buys exactly one of them, and eight covers every
@@ -585,7 +628,7 @@ int build(Options options) {
                 }
             }
             current = options.analysis / (id + ".recomp.stubbed.toml");
-            if (!write_file(current, with_stubs(read_file(config), stubbed))) {
+            if (!write_file(current, with_stubs(read_file(base), stubbed))) {
                 fail("could not write the amended recompiler configuration");
                 return 1;
             }
@@ -613,6 +656,10 @@ int build(Options options) {
             rsp_source = entry.path();
             break;
         }
+    }
+    if (options.trace && !write_file(generated / "trace.h", kTraceHeader)) {
+        fail("could not write the trace header");
+        return 1;
     }
     if (!write_file(generated / "module.cpp", emit_module_cpp(info_json, rom_hash, rsp_source))) {
         fail("could not write the module descriptor");
@@ -738,6 +785,7 @@ void usage() {
                  "usage: n64b-port build --analysis <dir> --rom <rom.z64> --out <module.dylib>\n"
                  "                       [--recomp <N64Recomp>] [--cc <clang>] [--include <dir>]\n"
                  "                       [--opt <-O2>] [--jobs <n>] [--force] [--keep-c]\n"
+                 "                       [--trace]\n"
                  "                       [--porcelain]\n");
 }
 
@@ -781,6 +829,7 @@ int main(int argc, char **argv) {
         else if (arg == "--jobs") options.jobs = unsigned(std::strtoul(next_arg().c_str(), nullptr, 10));
         else if (arg == "--force") options.force = true;
         else if (arg == "--keep-c") options.keep_c = true;
+        else if (arg == "--trace") options.trace = true;
         else if (arg == "--porcelain") porcelain = true;
         else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());

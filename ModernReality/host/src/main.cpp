@@ -203,6 +203,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     n64b::init_input();
+    n64b::install_trace(options.developer);
 
     // Hand the module's section table to the runtime. From here on, a call
     // into an address the game loaded at runtime resolves through this.

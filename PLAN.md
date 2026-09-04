@@ -227,14 +227,28 @@ function of its own — which cannot be named, cannot be stubbed, and arrives to
 late for any check here to have looked at it.
 
 **It gets much further than Super Mario 64, because it links against exactly
-the libultra this machine has a signature database for.** Its whole public API
-is named and substituted — `osPiStartDma`, `osCreateViManager`,
-`osViSwapBuffer`, `osSpTaskStartGo`, `osCreateThread` — so it boots, brings up
-its threads, relocates its main segment, runs its game loop and submits an RSP
-task. Then it reads a function pointer out of what is plainly string data and
-stops.
+the libultra this machine has a signature database for.** 51 functions are
+named, in one contiguous run from `0x80130960` to `0x80136CC0` — which is what
+a correctly identified static library looks like — and they are the whole
+public API: `osPiStartDma`, `osCreateViManager`, `osViSetMode`,
+`osViSwapBuffer`, `osSpTaskStartGo`, `osCreateThread`, `osRecvMesg`. So it
+boots, brings up its threads, relocates its main segment, runs its game loop,
+and **submits display lists that RT64 recognises the microcode of and
+processes.** It configures the video interface too: 320 pixels wide, a real
+mode, a real origin.
 
-Getting it that far took a title record and two things in the host:
+The window is still black, and the reason is now one value. The game hands
+`osViSwapBuffer` a null framebuffer, every frame, forever:
+
+```
+vi: origin 0x00000280 width 320, game framebuffer 0x00000000
+```
+
+An origin of 0x280 is the VI's own field offset added to nothing. Somewhere in
+the game's own state a framebuffer pointer was never filled in, and finding
+which one needs a memory watchpoint rather than more static analysis.
+
+Getting it that far took a title record and three things in the host:
 
 - **The record's `main` segment.** Mario Builder 64 moves nearly all of its
   code 0x36D0 higher than where IPL3's copy put it. Nothing in the image says
@@ -251,6 +265,15 @@ Getting it that far took a title record and two things in the host:
 - **An RSP task with no microcode is completed, not fatal.** Graphics tasks go
   to the renderer and never reach that path; what is left is audio. Taking the
   process down over sound is the wrong trade for a bundler.
+
+And it took the thing this project did not have: **a way to see what a
+recompiled game was doing when it went wrong.** `n64b-port --trace` turns on
+the recompiler's trace mode and supplies the header it expects; the host keeps
+the last few hundred function entries in a ring and prints them however the
+process ends. Five rounds of "run it, read the last function, add the address
+it could not resolve to the record" took Mario Builder 64 from dying on its
+first indirect call to running its game loop. Every one of those five was a
+function nothing calls directly.
 
 What stops it is still libultra, from the other end. 40 functions are stubbed
 because they drive hardware, and the analyser can now say what 24 of them are:

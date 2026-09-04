@@ -19,10 +19,13 @@
 
 #include <SDL.h>
 
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
 #include <librecomp/game.hpp>
+
+extern "C" PTR(void) osViGetCurrentFramebuffer();
 #include <librecomp/rsp.hpp>
 
 #include "hle/rt64_application.h"
@@ -110,7 +113,8 @@ std::filesystem::path rt64_data_path() {
 class RT64Context final : public ultramodern::renderer::RendererContext {
 public:
     RT64Context(uint8_t *rdram, ultramodern::renderer::WindowHandle window_handle,
-                bool developer_mode) {
+                bool developer_mode)
+        : developer_(developer_mode) {
         RT64::Application::Core core{};
         core.window.window = window_handle.window;
         core.window.view = window_handle.view;
@@ -215,6 +219,15 @@ public:
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(uint32_t(task->t.ucode) & physical,
                                         uint32_t(task->t.ucode_data) & physical, true);
+        // Whether the renderer knows this game's microcode at all is the other
+        // half of a black window, and it is knowable exactly once.
+        static bool first = true;
+        if (first) {
+            first = false;
+            std::fprintf(stderr, "note: the game submitted its first display list, and RT64 %s "
+                                 "its microcode.\n",
+                         app_->interpreter->hleGBI != nullptr ? "recognises" : "does NOT recognise");
+        }
         app_->processDisplayLists(app_->core.RDRAM, uint32_t(task->t.data_ptr) & physical, 0, true);
     }
 
@@ -226,9 +239,24 @@ public:
     }
 
     void update_screen() override {
-        if (app_ != nullptr) {
-            app_->updateScreen();
+        if (app_ == nullptr) {
+            return;
         }
+        // What the VI is scanning out, once a second, in developer mode. It is
+        // the first thing to look at when a game runs and the window stays
+        // black: a width and an origin mean the game configured the video
+        // interface, and a framebuffer of zero means it never handed one over.
+        if (developer_) {
+            static int frames = 0;
+            if (frames % 60 == 0) {
+                const ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
+                std::fprintf(stderr, "vi: origin 0x%08X width %u, game framebuffer 0x%08X\n",
+                             vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
+                             uint32_t(osViGetCurrentFramebuffer()));
+            }
+            frames++;
+        }
+        app_->updateScreen();
     }
 
     void shutdown() override {
@@ -300,6 +328,7 @@ private:
     }
 
     std::unique_ptr<RT64::Application> app_;
+    bool developer_ = false;
     DeadRegisters dead_{};
     std::array<uint8_t, 0x40> header_{};
 };

@@ -45,11 +45,12 @@ Kept as patches under [`N64Bundler/patches/`](N64Bundler/patches) and applied
 by `build.sh`. When there are enough of them to be worth pushing back, they
 become forks and this becomes a `forks.sh`, the way DolBundler's did.
 
-All three exist for the same reason: the recompiler assumes its symbols came
-from an elf, where anything missing means the symbols are wrong. Recovered
+The first three exist for the same reason: the recompiler assumes its symbols
+came from an elf, where anything missing means the symbols are wrong. Recovered
 symbols are incomplete by nature, and the difference has to be tolerated rather
-than treated as a defect. None of them changes what a project recompiling from
-an elf sees.
+than treated as a defect. The fourth is about the console rather than the
+symbols. None of them changes what a project recompiling from an elf sees,
+except the fourth, which fixes a hang it would also have.
 
 `0001-n64recomp-recompile-from-recovered-symbols.patch`:
 
@@ -66,6 +67,18 @@ an elf sees.
   any C standard since C99. A project driving the recompiler by hand writes
   that declaration itself; one built from recovered symbols has nowhere to
   write it.
+
+- **A loop that only reads memory yields.** A game that waits for another
+  thread by spinning on a word rather than by receiving a message deadlocks the
+  runtime: every thread is real, but only one runs at a time and the runtime
+  chooses which, and it only gets to choose when the running thread calls into
+  it. A loop that only reads memory never does, so the thread that would write
+  the word never runs. On the console the timer interrupt breaks the spin. Such
+  a loop is now recognised — a backward branch of at most four instructions
+  whose body and delay slot are loads and nops, which cannot terminate on its
+  own — and a `spin_wait` call is emitted at the bottom of it. Exactly one loop
+  in each of the two cartridges tested matches, and in Mario Builder 64 it is
+  the one the game was hanging in.
 
 - **A write to `$zero` is a discard, not an assignment.** `lw $zero, 0(a0)` is
   a real idiom — a load kept for its side effect on the cache or the load slot.

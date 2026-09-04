@@ -14,11 +14,13 @@ and deliberately the same shape: a window over a headless pipeline, a library
 of games, per-game `.app` bundles that hold no game data, and a runtime tree
 that carries the forks.
 
-**This is under construction, and a game does not draw a frame yet.**
-Everything around that does: a ROM is analysed, recompiled, compiled, added to
-the library and launched into a window with the renderer up.
-[PLAN.md](PLAN.md) has the design, the measured numbers, and exactly what
-stands between here and a picture.
+**This is under construction. One game draws.** Mario Builder 64 recompiles,
+boots, and renders its startup screen from its own display lists; Super Mario
+64 recompiles completely and stops inside its own libultra, for a reason that
+is a missing signature database rather than a missing idea. Everything around
+both works: a ROM is analysed, recompiled, compiled, added to the library and
+launched into a window with the renderer up. [PLAN.md](PLAN.md) has the design,
+the measured numbers, and what each of the two is waiting on.
 
 ## Quick start
 
@@ -111,10 +113,19 @@ A second ROM goes much further. Mario Builder 64, a Super Mario 64 romhack,
 links against exactly the libultra a signature database could be built from
 here, so its whole libultra API is named and substituted. It boots, brings up
 its threads, relocates its main segment, runs its game loop, and submits
-display lists that RT64 recognises the microcode of and draws — and then hands
-the video interface a null framebuffer, every frame, so nothing reaches the
-window. That is one uninitialised pointer in the game's own state rather than
-anything structural.
+display lists that RT64 recognises the microcode of and draws. It reaches its
+startup screen — the game's own font, saying that SD card emulation is not
+detected — and waits there for a button.
+
+Getting it there took the record naming three things nothing points at (the
+segment it relocates its code to, the segment of extra code it loads to the top
+of RAM, and the handlers of the two interpreters it reaches only through
+tables), and two fixes with nothing to do with this cartridge: the runtime was
+registering every section twice, once at an address guessed from the entrypoint
+and once where the analysis put it, so every indirect call resolved to the
+wrong function; and the recompiler now yields out of a loop that only reads
+memory, because a console model where the runtime schedules only when the game
+calls into it cannot break a busy-wait the way an interrupt does.
 
 Two titles is enough to see the shape of the problem: with the right libultra a
 ROM gets into its own code and what is left is finding its segments; without

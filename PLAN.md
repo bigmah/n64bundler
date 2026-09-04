@@ -190,7 +190,7 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | `.app` packaging | done — cover art, icon, launcher holding no game data |
 | per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
 | a second title | done — Mario Builder 64 recompiles too, at 100% coverage |
-| **a game that draws a frame** | **nearly** — one renders 19, all of them black; see below |
+| **a game that draws a frame** | done — Mario Builder 64 draws its startup screen; see below |
 
 ### Where Super Mario 64 stands
 
@@ -216,12 +216,12 @@ where every boundary rule here was actually tested — Super Mario 64 was alread
 at 100% before any of them existed:
 
 ```
-2,577 functions recovered
-8,912 of 8,912 internal calls land on a function boundary (100.00%)
-509 boundaries added where a call landed inside a function
+2,657 functions recovered across three sections
+8,963 of 8,963 internal calls land on a function boundary (100.00%)
+626 boundaries added where a call landed inside a function
 ```
 
-Before the splitting pass it scored 77.86%, and each of the 308 calls landing
+Before the splitting pass it scored 77.86%, and each of the calls landing
 inside a function was a place the recompiler would have invented a `static_`
 function of its own — which cannot be named, cannot be stubbed, and arrives too
 late for any check here to have looked at it.
@@ -275,29 +275,87 @@ And it took the thing this project did not have: **a way to see what a
 recompiled game was doing when it went wrong.** `n64b-port --trace` turns on
 the recompiler's trace mode and supplies the header it expects; the host keeps
 the last few hundred function entries in a ring and prints them however the
-process ends. Five rounds of "run it, read the last function, add the address
-it could not resolve to the record" took Mario Builder 64 from dying on its
-first indirect call to running its game loop. Every one of those five was a
-function nothing calls directly.
+process ends. Rounds of "run it, read the last function, add the address it
+could not resolve to the record" took Mario Builder 64 from dying on its first
+indirect call to running its game loop; the record names 47 functions now, and
+every one of them is a function nothing calls directly.
 
-**It draws.** Nineteen frames, into a framebuffer it allocated itself:
+**It draws.** This is Mario Builder 64's startup screen, read out of the
+console's memory exactly as the video interface would scan it:
 
 ```
-vi: origin 0x0040E5C0 width 320, game framebuffer 0x8040E340, 19 display lists
+note: wrote frame.ppm, 320 by 237, from the frame at 0x0040E5C0
+320x237, 3 colours
+  000000 x72417     <- background
+  ffffff x2932      <- body text
+  ffff00 x491       <- the heading
 ```
 
-Then it stops, and the window never shows any of them because all nineteen are
-the black ones a Super Mario 64 boot starts with. What it stops on is a
-busy-wait in its own code, immediately after it allocates the whole of the rest
-of its memory pool -- which is what a level editor does when it is about to
-load something. Every stubbed function has been ruled out of that path, the
-segment addresses are confirmed from three directions, the game sees its 8MB,
-and the pool pointer moves the way a working allocator's does. Whatever it is
-waiting for needs the game's symbols to name.
+It is the game's own font, drawn from the game's own display lists, saying that
+SD card emulation is not detected and the level editor will not be able to
+save. The game then waits for a button.
+
+Getting from nineteen black frames to that took four separate faults, and each
+one was invisible until the one in front of it was gone.
+
+**The runtime was registering every section twice.** A game starts by having
+the runtime register every section whose rom address falls in the first
+megabyte, as though the cartridge were one contiguous image loaded at the
+entrypoint — which is what a game built from an elf looks like. A game
+recovered from a bare rom is not: its segments are scattered and land where its
+own loader puts them. Registering a section again does not remove the first
+registration, so both the guess and the truth stayed in the address-to-function
+map, and the guess, at the lower address, answered first. Every indirect call
+in Mario Builder 64's behaviour interpreter was landing on the function 0x36D0
+further on — silently, because that address is a real function too. The host
+now discards the guess before placing what the analysis found.
+
+**Ten behaviour commands and seven geo commands were not functions.** Mario
+Builder 64 runs each object through an interpreter whose whole body is
+`handler = table[*script++]; handler()`, and the sixty-five handlers are
+reached only through that table, so no `jal` points at them and nothing splits
+the function each one sits inside. A table of code pointers is not enough on
+its own to name a function — a `switch` compiles to one too, and its entries
+are labels inside a function — and measured on this cartridge the two kinds do
+not separate cleanly: the real tables are 76% to 94% preceded by a return and
+the switch tables reach 58%. What does separate them is how much the walk
+already found. Every real table here was between 78% and 97% recovered
+boundaries and every switch table was 0%, so the gaps in the nearly-complete
+ones are safe to name, and they are named in the record.
+
+**The game loads code to the top of RAM.** One of its behaviour commands,
+`0x16`, is four words: a ram address and a rom range. Five scripts issue it and
+all five name the same 3KB segment, which lands at `0x807FF3A0`, immediately
+under the top of an expanded 8MB console. The geo layouts those scripts build
+then call into it. Nothing in the analysis had ever seen that code, so the
+first call into it was an indirect call to an address in no section at all.
+It is a `[[section]]` in the record now.
+
+**And it was busy-waiting.** The last fault was not in the game at all. It sets
+a counter to zero and reads it in a three-instruction loop until the audio
+thread raises it. On the console the timer interrupt breaks that loop and
+libultra runs the higher-priority thread. Here every thread is real but only
+one runs at a time, the runtime picks which, and it only gets to pick when the
+running thread calls into it — and a loop that only reads memory never does. So
+the thread that would raise the counter never ran. The recompiler now
+recognises a loop that cannot terminate on its own — a backward branch of at
+most four instructions whose body and delay slot are loads and nops — and emits
+a yield at the bottom of it. Exactly one loop in each of the two cartridges
+tested matches. The display-list count went from 19 to 421 in the same thirty
+seconds.
+
+### A frame you can look at
+
+A window is the real answer to "does this game draw", and a window is no answer
+at all to a script, a log, or a machine whose screen is locked. The renderer
+copies each finished frame back into the console's own memory in the console's
+own format, which is what a real video interface would be reading, so that copy
+is the frame. `N64B_SCREENSHOT=<path>` writes it as a PPM — no graphics API, no
+readback, thirty lines. `N64B_SCREENSHOT_AFTER=<frames>` picks when.
 
 ### Two register windows and a watchpoint
 
-Chasing that turned up two things worth having.
+Chasing all of that turned up three more things worth having.
 
 **The console's registers are ordinary memory now.** librecomp maps KSEG0 and
 nothing else, so a translated instruction storing to the RCP at `0xA4xxxxxx`
@@ -309,6 +367,15 @@ the register access is real, the access reads zero and discards writes, and
 zero is the useful answer because libultra's waits are all "while the device is
 busy". Stubs fell from 28 to 11 on Super Mario 64 and from 38 to 10 on Mario
 Builder 64.
+
+**A trace that separates the threads, and a backtrace when it stops.** One ring
+buffer of function entries is all idle thread: it enters a function tens of
+millions of times a second and the game thread's last dozen calls are nowhere.
+Kept per thread, with runs of a repeated pair folded into a count, the thread
+that stopped is one short list. And because the recompiled code calls a
+recompiled function as an ordinary C function, a native backtrace names the
+game's own call stack — which is how the loop that was calling a behaviour
+handler four billion times was found, in one run.
 
 **Two libultra functions are named by shape rather than by signature.**
 `n64sig` will not fingerprint a function shorter than six instructions, and it

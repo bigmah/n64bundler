@@ -419,9 +419,13 @@ constexpr const char *kTraceHeader = R"(// Written by n64b-port for --trace.
 #ifndef N64B_TRACE_H
 #define N64B_TRACE_H
 
-void n64b_trace(const char *name);
+// `ctx` is the game's register file. It is passed because the registers at the
+// moment a function is entered are the argument list, and because `$v0` at the
+// entry of a function reached through `jalr $v0` is the address the game
+// wanted -- which is the only way to see where a table of pointers sent it.
+void n64b_trace(const char *name, const void *ctx);
 
-#define TRACE_ENTRY() n64b_trace(__func__);
+#define TRACE_ENTRY() n64b_trace(__func__, ctx);
 // The recompiler emits one of these before every return. The ring buffer only
 // needs entries to reconstruct the path, so this is deliberately nothing.
 #define TRACE_RETURN() ;

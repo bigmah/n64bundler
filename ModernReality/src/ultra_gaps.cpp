@@ -107,3 +107,27 @@ extern "C" void __ll_rshift_recomp(uint8_t *rdram, recomp_context *ctx) {
     const uint64_t b = pair(ctx->r6, ctx->r7) & 63;
     return_pair(ctx, (uint64_t)(a >> b));
 }
+
+// --- yielding out of a spin loop ---------------------------------------------
+//
+// A game that waits for another thread by reading a word in a loop -- rather
+// than by receiving a message -- stops the console model dead. Every thread is
+// a real thread here, but only one of them runs at a time and the runtime picks
+// which, and it only gets to pick when the running thread calls into it. A loop
+// that only reads memory never calls into anything, so the thread that would
+// write the word never runs, and the wait never ends. On the console the timer
+// interrupt arrives and libultra's scheduler runs the higher-priority thread.
+//
+// The recompiler emits a call to this at the bottom of any loop it can prove
+// only reads memory. Deliver whatever the console's own hardware has been
+// waiting to deliver, then let the runtime choose a thread the way it would if
+// the game had asked it something. The one-millisecond form rather than the
+// blocking one: a game whose events have stopped entirely should keep spinning
+// as the console would, not stop in a wait of our own making.
+
+extern "C" void yield_self_1ms(uint8_t *rdram);
+
+extern "C" void spin_wait(uint8_t *rdram, recomp_context *ctx) {
+    (void)ctx;
+    yield_self_1ms(rdram);
+}

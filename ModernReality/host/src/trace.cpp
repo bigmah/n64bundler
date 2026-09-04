@@ -15,6 +15,7 @@
 // it exits.
 
 #include <atomic>
+#include <execinfo.h>
 #include <csignal>
 #include <initializer_list>
 #include <cstdio>
@@ -29,10 +30,46 @@ unsigned watch_value(unsigned address) {
     if (watched_rdram == nullptr) {
         return 0;
     }
-    const uint8_t *at = watched_rdram + (address - 0x80000000u);
-    return (unsigned(at[0]) << 24) | (unsigned(at[1]) << 16) | (unsigned(at[2]) << 8) | at[3];
+    // The runtime keeps RDRAM so that an aligned word is a native word --
+    // that is what `MEM_W` reads -- and only byte and halfword accesses swap.
+    unsigned word = 0;
+    __builtin_memcpy(&word, watched_rdram + (address - 0x80000000u), sizeof(word));
+    return word;
 }
 
+
+/// Print the words at each `address:count` in `N64B_DUMP`.
+///
+/// When a game has gone wrong the question is usually what a particular table
+/// or global holds now, as against what the cartridge put there. The addresses
+/// come from the disassembly, so they belong on the command line rather than
+/// in this file.
+void dump_memory(const char *why) {
+    const char *spec = std::getenv("N64B_DUMP");
+    if (spec == nullptr || watched_rdram == nullptr) {
+        return;
+    }
+    std::fprintf(stderr, "\n--- memory, %s ---\n", why);
+    while (*spec != '\0') {
+        char *after = nullptr;
+        const unsigned long address = std::strtoul(spec, &after, 0);
+        unsigned long count = 1;
+        if (*after == ':') {
+            count = std::strtoul(after + 1, &after, 0);
+        }
+        for (unsigned long i = 0; i < count; i++) {
+            const unsigned at = unsigned(address) + unsigned(i) * 4u;
+            std::fprintf(stderr, "%s%08X: %08X", i % 4 == 0 ? "" : "  ", at, watch_value(at));
+            if (i % 4 == 3 || i + 1 == count) {
+                std::fprintf(stderr, "\n");
+            }
+        }
+        if (*after != ',') {
+            break;
+        }
+        spec = after + 1;
+    }
+}
 
 // Enough to see how the game got where it got, small enough to stay in cache.
 constexpr size_t kEntries = 512;
@@ -55,13 +92,57 @@ struct Count {
 };
 Count counts[kSlots];
 
-void record(const char *name) {
+/// After this many entries into one function, print a native backtrace once.
+///
+/// A function that runs billions of times is being called from a loop that has
+/// stopped making progress, and the loop is in the caller. The recompiled
+/// caller calls it as an ordinary C function, so the native stack is the
+/// game's stack and naming it is enough to find the loop. Off unless
+/// `N64B_TRACE_STOP` is set.
+uint64_t backtrace_at() {
+    static const uint64_t at = [] {
+        const char *set = std::getenv("N64B_TRACE_STOP");
+        return set != nullptr ? std::strtoull(set, nullptr, 0) : 0ull;
+    }();
+    return at;
+}
+
+void print_registers(const void *ctx) {
+    static const char *kNames[32] = {"r0", "at", "v0", "v1", "a0", "a1", "a2", "a3",
+                                     "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+                                     "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+                                     "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
+    if (ctx == nullptr) {
+        return;
+    }
+    // The register file is thirty-two 64-bit words at the top of the context.
+    const uint64_t *gpr = static_cast<const uint64_t *>(ctx);
+    std::fprintf(stderr, "--- its registers ---\n");
+    for (size_t i = 0; i < 32; i++) {
+        std::fprintf(stderr, "%s %08X%s", kNames[i], unsigned(gpr[i]), (i % 8 == 7) ? "\n" : "  ");
+    }
+}
+
+void print_backtrace(const char *name, const void *ctx) {
+    void *frames[24];
+    const int depth = backtrace(frames, 24);
+    std::fprintf(stderr, "\n--- %s has run this many times; who is calling it ---\n", name);
+    std::fflush(stderr);
+    backtrace_symbols_fd(frames, depth, 2);
+    print_registers(ctx);
+    dump_memory("where it stopped");
+}
+
+void record(const char *name, const void *ctx) {
     size_t slot = (reinterpret_cast<uintptr_t>(name) >> 4) % kSlots;
     for (size_t probe = 0; probe < 64; probe++) {
         Count &entry = counts[(slot + probe) % kSlots];
         if (entry.name == name) {
             entry.hits++;
             entry.last_seen = next.load(std::memory_order_relaxed);
+            if (entry.hits == backtrace_at()) {
+                print_backtrace(name, ctx);
+            }
             return;
         }
         if (entry.name == nullptr) {
@@ -146,11 +227,12 @@ void dump_counts() {
 // interesting thing -- is nowhere. Kept separately, it is the first line of
 // its own list.
 constexpr size_t kThreads = 16;
-constexpr size_t kPerThread = 24;
+constexpr size_t kPerThread = 96;
 
 struct ThreadTail {
     std::atomic<bool> claimed{false};
     const char *names[kPerThread];
+    uint64_t repeats[kPerThread];
     size_t next;
 };
 
@@ -168,7 +250,20 @@ size_t my_slot() {
 void remember_per_thread(const char *name) {
     ThreadTail &tail = tails[my_slot()];
     tail.claimed.store(true, std::memory_order_relaxed);
-    tail.names[tail.next % kPerThread] = name;
+    // A thread that has stopped is usually spinning between two functions, and
+    // an honest tail of the last ninety-six entries is those two functions
+    // ninety-six times, which says nothing. Fold a repeat of either of the last
+    // two entries into a count, so the tail keeps what ran before the spin.
+    for (size_t back = 1; back <= 2 && back <= tail.next; back++) {
+        const size_t at = (tail.next - back) % kPerThread;
+        if (tail.names[at] == name) {
+            tail.repeats[at]++;
+            return;
+        }
+    }
+    const size_t at = tail.next % kPerThread;
+    tail.names[at] = name;
+    tail.repeats[at] = 0;
     tail.next++;
 }
 
@@ -183,14 +278,32 @@ void dump_threads() {
         const size_t shown = tail.next < kPerThread ? tail.next : kPerThread;
         for (size_t k = 0; k < shown; k++) {
             const size_t at = (tail.next - shown + k) % kPerThread;
-            std::fprintf(stderr, "%s%s", tail.names[at] != nullptr ? tail.names[at] : "?",
-                         (k + 1) % 6 == 0 ? "\n" : "  ");
+            char with_count[64];
+            if (tail.repeats[at] != 0) {
+                std::snprintf(with_count, sizeof(with_count), "%s x%llu",
+                              tail.names[at] != nullptr ? tail.names[at] : "?",
+                              (unsigned long long)(tail.repeats[at] + 1));
+            } else {
+                std::snprintf(with_count, sizeof(with_count), "%s",
+                              tail.names[at] != nullptr ? tail.names[at] : "?");
+            }
+            std::fprintf(stderr, "%-26s%s", with_count, (k + 1) % 4 == 0 ? "\n" : "  ");
         }
         std::fprintf(stderr, "\n");
     }
 }
 
 void dump() {
+    // The runtime ends a game by calling `exit` from wherever it noticed --
+    // an indirect call to an address no function covers, most often -- and
+    // this runs on that same stack, so a backtrace here names the recompiled
+    // function that made the call.
+    void *frames[16];
+    const int depth = backtrace(frames, 16);
+    std::fprintf(stderr, "\n--- where the game was when it ended ---\n");
+    std::fflush(stderr);
+    backtrace_symbols_fd(frames, depth, 2);
+    dump_memory("at exit");
     const size_t total = next.load();
     if (total == 0) {
         return;
@@ -230,9 +343,9 @@ extern "C" void n64b_watch(unsigned address, const char *where) {
 /// tracing. Deliberately not thread-safe beyond the atomic counter: a torn
 /// read across the game's threads costs one wrong name in a log, and a lock
 /// here would change the timing of the thing being debugged.
-extern "C" void n64b_trace(const char *name) {
+extern "C" void n64b_trace(const char *name, const void *ctx) {
     names[next.fetch_add(1, std::memory_order_relaxed) % kEntries] = name;
-    record(name);
+    record(name, ctx);
     remember_per_thread(name);
 }
 

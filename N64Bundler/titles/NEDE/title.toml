@@ -24,6 +24,22 @@ rom  = 0x0258E0
 vram = 0x8014C2E0
 size = 0x118460
 
+# The code Mario Builder 64 loads to the top of RAM.
+#
+# Its objects are described by behaviour scripts rather than compiled in, and
+# one of the script commands loads a segment of machine code: `0x16`, four
+# words, the ram address followed by the segment's rom start and end. Five
+# scripts issue it and all five name the same segment, so the game has exactly
+# one of these and it lands at 0x807FF3A0, immediately under the top of an
+# expanded 8MB console. The geo layouts the same scripts build then call into
+# it, which is how a game that had recompiled cleanly could still stop on an
+# indirect call to an address in nothing the analysis had ever seen.
+[[section]]
+name = "objects"
+rom  = 0x25BC84
+vram = 0x807FF3A0
+size = 0x000C40
+
 # Functions nothing calls directly, found by running the game with
 # `n64b-port --trace` and reading the address the runtime could not resolve out
 # of the last few hundred entries the host printed. Each one moved the game a
@@ -71,3 +87,145 @@ vram = 0x801B7BB4
 
 [[function]]
 vram = 0x801B7F00
+
+# The ten entries of the behaviour-command table at 0x8025E75C that no `jal`
+# points at.
+#
+# Mario Builder 64 runs each object through an interpreter whose whole body is
+# `handler = table[*script++]; handler();`, so the sixty-five handlers are
+# reachable only through that table and the walk has no reason to split the
+# function each one sits inside. Fifty-five of them are called directly from
+# somewhere else as well and were recovered; these ten were not, and each one
+# swallowed by its neighbour is a behaviour command the game cannot run.
+#
+# A table of code pointers is not enough on its own to name a function: a
+# `switch` compiles to one too, and its entries are labels inside a function
+# rather than functions. Measured on this cartridge, the two kinds are not
+# cleanly separable -- the real tables are 76% to 94% preceded by a return and
+# the switch tables reach 58% -- so this stays a record rather than a rule.
+[[function]]
+vram = 0x801B848C
+
+[[function]]
+vram = 0x801B7DA4
+
+[[function]]
+vram = 0x801B91B8
+
+[[function]]
+vram = 0x801B9530
+
+[[function]]
+vram = 0x801B913C
+
+[[function]]
+vram = 0x801B8FF8
+
+[[function]]
+vram = 0x801B9098
+
+[[function]]
+vram = 0x801B8F5C
+
+[[function]]
+vram = 0x801B8CA8
+
+[[function]]
+vram = 0x801B829C
+
+# Found the same way, one run at a time: the runtime prints the address it
+# could not resolve, and the address goes here.
+
+[[function]]
+vram = 0x801B6E30
+
+# Two of the six functions the geo layouts call into that segment. A geo layout
+# asks for one with `GEO_ASM`, a word of 0x18 followed by the address, and four
+# of the six are called from somewhere else as well; these two are not.
+[[function]]
+vram = 0x807FF850
+
+[[function]]
+vram = 0x807FFA64
+
+# The gaps in this cartridge's other five dispatch tables.
+#
+# The geo-layout interpreter works the way the behaviour one does, and so do
+# four smaller tables. Each is a run of consecutive words that all point into
+# the code, and in each the walk had already recovered between 78% and 97% of
+# the entries -- which is what makes the rest safe to name: a run that is
+# nearly all known function starts is a table of function pointers, whereas a
+# `switch` jump table, which looks the same from a distance, has none of its
+# entries recovered because they are labels inside a function. Every address
+# below begins with a prologue or a load, and every one of them sits after
+# another function's last instruction.
+
+[[function]]
+vram = 0x8014F3CC
+
+[[function]]
+vram = 0x8014F718
+
+[[function]]
+vram = 0x8017542C
+
+[[function]]
+vram = 0x801B6A18
+
+[[function]]
+vram = 0x801B6C2C
+
+[[function]]
+vram = 0x801B7270
+
+[[function]]
+vram = 0x801B7308
+
+[[function]]
+vram = 0x801B73A0
+
+[[function]]
+vram = 0x801B7458
+
+[[function]]
+vram = 0x801B75E0
+
+[[function]]
+vram = 0x801C9EEC
+
+[[function]]
+vram = 0x801CACC4
+
+[[function]]
+vram = 0x80171A94
+
+[[function]]
+vram = 0x80171E60
+
+[[function]]
+vram = 0x80172698
+
+[[function]]
+vram = 0x801B5864
+
+[[function]]
+vram = 0x801B58B8
+
+[[function]]
+vram = 0x801B5998
+
+[[function]]
+vram = 0x801B59F8
+
+# Three more the tables did not cover: two gaps in smaller tables, and one that
+# a tail call reaches from a table Mario Builder 64 keeps in a segment of its
+# own -- its object database, which it loads when the editor asks for it.
+
+[[function]]
+vram = 0x801CC198
+
+[[function]]
+vram = 0x8014CAA8
+
+[[function]]
+vram = 0x8015A188

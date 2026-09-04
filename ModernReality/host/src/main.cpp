@@ -113,6 +113,23 @@ void place_sections(uint8_t *rdram, recomp_context *ctx) {
     if (loaded_module == nullptr) {
         return;
     }
+    // Undo the runtime's guess before making our own.
+    //
+    // The runtime starts a game by registering every section whose rom address
+    // falls in the first megabyte as though the cartridge were one contiguous
+    // image loaded at the entrypoint, which is what a game built from an elf
+    // looks like. A game recovered from a bare rom is not: its segments are
+    // scattered through the cartridge and land wherever the game's own loader
+    // puts them, and the analysis knows where. Registering a section a second
+    // time does not remove the first, so both the guess and the truth stay in
+    // the address-to-function map -- and the guess, being a lower address,
+    // answers first for anything the game reaches through a pointer. Every
+    // indirect call in Mario Builder 64's behaviour interpreter was landing on
+    // the function 0x36D0 bytes further on, which is exactly the distance
+    // between where the guess put the main segment and where the game does.
+    constexpr int32_t kRdramStart = 0x80000000;
+    constexpr uint32_t kRdramSize = 8 * 1024 * 1024;
+    unload_overlays(kRdramStart, kRdramSize);
     for (size_t i = 0; i < loaded_module->num_code_sections; i++) {
         const SectionTableEntry &section = loaded_module->code_sections[i];
         load_overlays(section.rom_addr, int32_t(section.ram_addr), section.size);

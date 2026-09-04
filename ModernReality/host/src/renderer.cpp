@@ -20,6 +20,7 @@
 #include <SDL.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -239,9 +240,84 @@ public:
         // workload, and the swap chain clears, so leaving it is honest.
     }
 
+    /// Write what the video interface is scanning out, as a PPM.
+    ///
+    /// The window is the real answer to "does this game draw", but a window
+    /// cannot be looked at from a script, on a locked screen, or in a log. The
+    /// renderer copies each finished frame back into the console's own memory
+    /// in the console's own format, which is what a real video interface would
+    /// be reading, so that copy is the frame -- and turning it into a file
+    /// costs nothing and needs nothing from the graphics API.
+    void write_screenshot(const char *path) const {
+        const ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
+        const unsigned width = vi->VI_WIDTH_REG;
+        // The origin is a physical address, and the frame is as tall as the
+        // vertical active window, which the VI counts in half-lines.
+        const unsigned origin = vi->VI_ORIGIN_REG & 0x00FFFFFFu;
+        const unsigned start = (vi->VI_V_START_REG >> 16) & 0x3FFu;
+        const unsigned end = vi->VI_V_START_REG & 0x3FFu;
+        const unsigned height = (end > start) ? (end - start) / 2 : 240;
+        if (width == 0 || origin == 0 || width > 1280 || height > 720) {
+            std::fprintf(stderr, "note: no frame to write: origin 0x%08X width %u\n", origin, width);
+            return;
+        }
+        // Every N64 pixel format the video interface can scan out.
+        const unsigned depth = vi->VI_STATUS_REG & 3u;
+        if (depth != 2 && depth != 3) {
+            std::fprintf(stderr, "note: the video interface is blanked (status 0x%08X)\n",
+                         vi->VI_STATUS_REG);
+            return;
+        }
+        std::FILE *out = std::fopen(path, "wb");
+        if (out == nullptr) {
+            std::fprintf(stderr, "note: could not write %s\n", path);
+            return;
+        }
+        std::fprintf(out, "P6\n%u %u\n255\n", width, height);
+        const uint8_t *rdram = app_->core.RDRAM;
+        for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+                unsigned r = 0, g = 0, b = 0;
+                if (depth == 2) {
+                    // 16-bit, five bits each and one of coverage. A word holds
+                    // two pixels, and a word is native here.
+                    const unsigned at = origin + (y * width + x) * 2u;
+                    unsigned word = 0;
+                    __builtin_memcpy(&word, rdram + (at & ~3u), sizeof(word));
+                    const unsigned pixel = (at & 2u) ? (word & 0xFFFFu) : (word >> 16);
+                    r = ((pixel >> 11) & 31) * 255 / 31;
+                    g = ((pixel >> 6) & 31) * 255 / 31;
+                    b = ((pixel >> 1) & 31) * 255 / 31;
+                } else {
+                    const unsigned at = origin + (y * width + x) * 4u;
+                    unsigned word = 0;
+                    __builtin_memcpy(&word, rdram + at, sizeof(word));
+                    r = (word >> 24) & 0xFF;
+                    g = (word >> 16) & 0xFF;
+                    b = (word >> 8) & 0xFF;
+                }
+                const unsigned char rgb[3] = {(unsigned char)r, (unsigned char)g, (unsigned char)b};
+                std::fwrite(rgb, 1, 3, out);
+            }
+        }
+        std::fclose(out);
+        std::fprintf(stderr, "note: wrote %s, %u by %u, from the frame at 0x%08X\n", path, width,
+                     height, origin);
+    }
+
     void update_screen() override {
         if (app_ == nullptr) {
             return;
+        }
+        // A frame on disk, for when the window cannot be looked at.
+        if (const char *path = std::getenv("N64B_SCREENSHOT")) {
+            static int until = [] {
+                const char *after = std::getenv("N64B_SCREENSHOT_AFTER");
+                return after != nullptr ? std::atoi(after) : 600;
+            }();
+            if (until > 0 && --until == 0) {
+                write_screenshot(path);
+            }
         }
         // What the VI is scanning out, once a second, in developer mode. It is
         // the first thing to look at when a game runs and the window stays

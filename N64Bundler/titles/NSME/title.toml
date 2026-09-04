@@ -44,3 +44,76 @@ name = "goddard"
 rom  = 0x21F4C0
 vram = 0x8016F000
 size = 0x60000
+
+# The libultra functions that drive the hardware, which the signature database
+# cannot reach.
+#
+# The database was built from Mario Builder 64's `libultra.a`, a much later SDK
+# revision than the one this cartridge was linked against, so the twenty
+# functions it names here are the ones that happen not to have changed between
+# them -- threads, message queues, caches, the task interface. What changed is
+# every device driver, and those are exactly the ones that matter: unnamed,
+# they run as recompiled MIPS writing to hardware registers that the host backs
+# with zeroed pages, so the write is discarded and the device never does
+# anything.
+#
+# Each one below was identified from the disassembly rather than guessed, and
+# the evidence is written next to it. The runtime implements all of them.
+
+# Sets a message's type to 11 or 12 -- OS_MESG_TYPE_DMAREAD and DMAWRITE -- by
+# the direction it was passed, fills in the rest of an OSIoMesg, and hands it
+# to the PI manager's queue, returning -1 if that manager was never started.
+# Every cartridge read in the game goes through it.
+[[function]]
+vram = 0x80324460
+name = "osPiStartDma"
+
+# Sets the queue and message for an event, indexing a table of eight-byte
+# entries by the event number.
+[[function]]
+vram = 0x803225D0
+name = "osSetEventMesg"
+
+# Three arguments, and it writes all three into the video interface's pending
+# context -- queue, message, retrace count.
+[[function]]
+vram = 0x80322640
+name = "osViSetEvent"
+
+# Creates a thread and a queue, registers an event, and calls the routine that
+# writes the video registers. The video manager.
+[[function]]
+vram = 0x80322F70
+name = "osCreateViManager"
+
+# Stores its argument at offset 8 of the pending context -- the mode pointer --
+# and sets the context's state to 1.
+[[function]]
+vram = 0x803232D0
+name = "osViSetMode"
+
+# Takes a byte, which is the only libultra video call that does.
+[[function]]
+vram = 0x80323340
+name = "osViBlack"
+
+# Tests its argument against 1, which is OS_VI_GAMMA_ON, the first of the
+# feature bits.
+[[function]]
+vram = 0x803233B0
+name = "osViSetSpecialFeatures"
+
+# Stores its argument at offset 4 of the pending context -- the framebuffer --
+# and ors 0x10 into the state, which is the bit meaning an address was set.
+# This is the call the renderer needs: it is what hands over the frame.
+[[function]]
+vram = 0x80323A00
+name = "osViSwapBuffer"
+
+# Halts the signal processor, waits for it to say so, and DMAs a task's
+# microcode and data into its memory. Unnamed it spins forever: the halt bit it
+# waits for lives in a register the host backs with zeroed pages, and zero
+# there means "still running".
+[[function]]
+vram = 0x80322A5C
+name = "osSpTaskLoad"

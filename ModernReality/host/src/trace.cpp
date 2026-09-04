@@ -137,6 +137,59 @@ void dump_counts() {
     }
 }
 
+// The same, per thread.
+//
+// A game runs several: the scheduler, the audio, the game loop, and libultra's
+// idle thread, which is an empty `while (1)` and enters a function tens of
+// millions of times a second. In one shared ring that idle spin is all there
+// is, and what the game thread was doing when it stopped -- the only
+// interesting thing -- is nowhere. Kept separately, it is the first line of
+// its own list.
+constexpr size_t kThreads = 16;
+constexpr size_t kPerThread = 24;
+
+struct ThreadTail {
+    std::atomic<bool> claimed{false};
+    const char *names[kPerThread];
+    size_t next;
+};
+
+ThreadTail tails[kThreads];
+std::atomic<size_t> thread_count{0};
+
+size_t my_slot() {
+    thread_local size_t slot = [] {
+        const size_t index = thread_count.fetch_add(1);
+        return index < kThreads ? index : kThreads - 1;
+    }();
+    return slot;
+}
+
+void remember_per_thread(const char *name) {
+    ThreadTail &tail = tails[my_slot()];
+    tail.claimed.store(true, std::memory_order_relaxed);
+    tail.names[tail.next % kPerThread] = name;
+    tail.next++;
+}
+
+void dump_threads() {
+    for (size_t i = 0; i < kThreads; i++) {
+        ThreadTail &tail = tails[i];
+        if (!tail.claimed.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        std::fprintf(stderr, "\n--- thread %zu, last %zu functions, oldest first ---\n", i,
+                     tail.next < kPerThread ? tail.next : kPerThread);
+        const size_t shown = tail.next < kPerThread ? tail.next : kPerThread;
+        for (size_t k = 0; k < shown; k++) {
+            const size_t at = (tail.next - shown + k) % kPerThread;
+            std::fprintf(stderr, "%s%s", tail.names[at] != nullptr ? tail.names[at] : "?",
+                         (k + 1) % 6 == 0 ? "\n" : "  ");
+        }
+        std::fprintf(stderr, "\n");
+    }
+}
+
 void dump() {
     const size_t total = next.load();
     if (total == 0) {
@@ -152,6 +205,7 @@ void dump() {
     }
     std::fprintf(stderr, "\n");
     dump_counts();
+    dump_threads();
 }
 
 } // namespace
@@ -179,6 +233,7 @@ extern "C" void n64b_watch(unsigned address, const char *where) {
 extern "C" void n64b_trace(const char *name) {
     names[next.fetch_add(1, std::memory_order_relaxed) % kEntries] = name;
     record(name);
+    remember_per_thread(name);
 }
 
 /// Arrange for the buffer to be printed however the process ends. A game that

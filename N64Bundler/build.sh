@@ -105,17 +105,63 @@ fi
 
 step "Building the analyser and the recompiler"
 cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" \
-  --target n64rip N64RecompCLI RSPRecomp
+  --target n64rip n64sig modernreality_ultra_gaps N64RecompCLI RSPRecomp
 
 RECOMP_BIN_DIR="$MR_BUILD/vendor/N64ModernRuntime/librecomp/N64Recomp"
-for tool in "$MR_BUILD/n64rip" "$RECOMP_BIN_DIR/N64Recomp" "$RECOMP_BIN_DIR/RSPRecomp"; do
+for tool in "$MR_BUILD/n64rip" "$MR_BUILD/n64sig" \
+            "$RECOMP_BIN_DIR/N64Recomp" "$RECOMP_BIN_DIR/RSPRecomp"; do
   [ -x "$tool" ] || { echo "expected $tool to exist" >&2; exit 1; }
 done
+
+# Which libultra functions the runtime can stand in for.
+#
+# The recompiler reacts to a libultra name it recognises by not emitting that
+# function's body, on the understanding that the runtime supplies one. Most of
+# the time it does. The exceptions are functions the projects librecomp was
+# built for happened to provide themselves, and naming one of those turns a
+# working translation into a link error.
+#
+# So the list is read out of the built libraries rather than written down: it is
+# exactly the set of `<name>_recomp` symbols that exist, and it cannot drift.
+step "Reading the runtime's libultra coverage"
+PROVIDES="$MR_BUILD/runtime-provides.txt"
+nm -g "$MR_BUILD/vendor/N64ModernRuntime/librecomp/liblibrecomp.a" \
+      "$MR_BUILD/vendor/N64ModernRuntime/ultramodern/libultramodern.a" \
+      "$MR_BUILD/libmodernreality_ultra_gaps.a" 2>/dev/null \
+  | grep -oE '_[A-Za-z_][A-Za-z0-9_]*_recomp$' \
+  | sed 's/^_//; s/_recomp$//' | sort -u > "$PROVIDES"
+echo "    $(wc -l < "$PROVIDES" | tr -d ' ') libultra functions the runtime implements"
+
+# The signature database, if there is anything to build one from.
+#
+# Naming libultra inside a ROM needs libultra's own binaries to compare against,
+# and those are Nintendo's, so nothing here ships one -- the same rule the ROMs
+# themselves follow. Point N64_LIBULTRA at the `libultra*.a` from a
+# decompilation project you have set up and the database is built from it.
+# Without one, a game still recompiles; it just does so with libultra's hardware
+# routines translated rather than replaced, and does not get far.
+step "Building the libultra signature database"
+SIGNATURES="$MR_BUILD/libultra.n64sig"
+LIBULTRA_FILES=()
+for candidate in ${N64_LIBULTRA:-}; do
+  [ -f "$candidate" ] && LIBULTRA_FILES+=("$candidate")
+done
+if [ "${#LIBULTRA_FILES[@]}" -gt 0 ]; then
+  "$MR_BUILD/n64sig" build "${LIBULTRA_FILES[@]}" --out "$SIGNATURES" | sed 's/^/    /'
+else
+  rm -f "$SIGNATURES"
+  echo "    no libultra archive given, so nothing in a ROM can be named."
+  echo "    Set N64_LIBULTRA to the libultra*.a from a decompilation project:"
+  echo "      N64_LIBULTRA=\"/path/to/lib/n64/libultra*.a\" ./N64Bundler/build.sh"
+fi
 
 if [ "$TOOLS_ONLY" -eq 1 ]; then
   printf '\n%sTools built.%s Try:\n' "$bold" "$off"
   printf '  %s inspect <rom.z64>\n' "$MR_BUILD/n64rip"
-  printf '  %s analyze <rom.z64> --out-dir /tmp/rip\n' "$MR_BUILD/n64rip"
+  printf '  %s analyze <rom.z64> --out-dir /tmp/rip \\\n' "$MR_BUILD/n64rip"
+  printf '      --runtime-provides %s' "$PROVIDES"
+  [ -f "$SIGNATURES" ] && printf ' \\\n      --signatures %s' "$SIGNATURES"
+  printf '\n  %s /tmp/rip/<ID>.recomp.toml\n' "$RECOMP_BIN_DIR/N64Recomp"
   exit 0
 fi
 
@@ -139,6 +185,8 @@ REPO_ROOT=$(printf '%q' "$ROOT")
 MR_SRC=$(printf '%q' "$MR_SRC")
 MR_BUILD=$(printf '%q' "$MR_BUILD")
 RECOMP_BIN_DIR=$(printf '%q' "$RECOMP_BIN_DIR")
+RUNTIME_PROVIDES=$(printf '%q' "$PROVIDES")
+SIGNATURES=$(printf '%q' "$SIGNATURES")
 APPS_DIR=$(printf '%q' "$INSTALL_DIR")
 # Where cmake and ninja were found. A Finder-launched app gets launchd's PATH,
 # which has no Homebrew on it, so the pipeline puts these back itself.

@@ -42,6 +42,34 @@ foreach(tool N64RecompCLI RSPRecomp)
 endforeach()
 
 # ---------------------------------------------------------------------------
+# The libultra helpers librecomp does not carry. Built here rather than with the
+# host because build.sh reads the symbol list out of it to decide which names
+# the analyser is allowed to use, and that has to work before the host exists.
+
+add_library(modernreality_ultra_gaps STATIC src/ultra_gaps.cpp)
+target_link_libraries(modernreality_ultra_gaps PRIVATE librecomp ultramodern)
+target_include_directories(modernreality_ultra_gaps PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/N64Recomp/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/librecomp/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/ultramodern/include"
+)
+
+# ---------------------------------------------------------------------------
+# n64sig - fingerprinting libultra, so its functions can be named in a ROM.
+# Shared as a library because the analyser matches against what this builds.
+
+add_library(n64sig_core STATIC
+    tools/n64sig/signature.cpp
+    tools/n64sig/harvest.cpp
+)
+target_include_directories(n64sig_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/tools/n64sig")
+target_compile_options(n64sig_core PRIVATE -Wall -Wno-unused-parameter)
+
+add_executable(n64sig tools/n64sig/main.cpp)
+target_link_libraries(n64sig PRIVATE n64sig_core)
+target_compile_options(n64sig PRIVATE -Wall -Wno-unused-parameter)
+
+# ---------------------------------------------------------------------------
 # n64rip
 
 add_executable(n64rip
@@ -50,7 +78,7 @@ add_executable(n64rip
     tools/n64rip/analyze.cpp
     tools/n64rip/emit.cpp
 )
-target_link_libraries(n64rip PRIVATE rabbitizer)
+target_link_libraries(n64rip PRIVATE rabbitizer n64sig_core)
 target_compile_options(n64rip PRIVATE -Wall -Wno-unused-parameter)
 
 # ---------------------------------------------------------------------------

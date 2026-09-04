@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <set>
@@ -54,6 +55,22 @@ struct Walk {
     std::vector<uint32_t> call_targets; // every `jal` seen inside it, and any
                                         // absolute `jr` it tail-calls through
 };
+
+/// Could this be the address of code in this image?
+///
+/// RDRAM is 4MB, 8MB with the Expansion Pak, and running code lives in the
+/// cached KSEG0 window that starts at 0x80000000. An absolute jump to anywhere
+/// else is not a call this program makes -- it is a sign we are not reading
+/// code that runs at the address we think it does.
+///
+/// Super Mario 64 is where this earns its keep. Just past the end of .text sits
+/// the exception handler, which is real MIPS but is copied to 0x80000180
+/// before it runs, so read in place its jumps come out at 0x84001068. Without
+/// this check the sweep accepts it as a function, and the recompiler translates
+/// a jump to an address that does not exist.
+bool plausible_code_address(uint32_t address) {
+    return address >= 0x80000000u && address < 0x80800000u && (address & 3) == 0;
+}
 
 /// Where a `jr $rs` is going, when the answer is written down in front of it.
 ///
@@ -152,9 +169,14 @@ Walk walk_function(const Rom &rom, const SectionInfo &section, uint32_t start) {
         }
 
         switch (insn.getUniqueId()) {
-            case InstrId::cpu_jal:
-                walk.call_targets.push_back(uint32_t(insn.getBranchVramGeneric()));
+            case InstrId::cpu_jal: {
+                const uint32_t target = uint32_t(insn.getBranchVramGeneric());
+                if (!plausible_code_address(target)) {
+                    return walk;
+                }
+                walk.call_targets.push_back(target);
                 break;
+            }
 
             case InstrId::cpu_j: {
                 // Either a jump inside the function or a tail call out of it.
@@ -163,6 +185,9 @@ Walk walk_function(const Rom &rom, const SectionInfo &section, uint32_t start) {
                 // have not already established is part of this function is a
                 // tail call, and tail calls end functions.
                 const uint32_t target = uint32_t(insn.getBranchVramGeneric());
+                if (!plausible_code_address(target)) {
+                    return walk;
+                }
                 if (target >= start && target <= furthest_branch) {
                     break;
                 }
@@ -187,7 +212,7 @@ Walk walk_function(const Rom &rom, const SectionInfo &section, uint32_t start) {
                 }
                 const std::optional<uint32_t> target =
                     resolve_jump_register(rom, section, vram, (word >> 21) & 0x1F);
-                if (target.has_value()) {
+                if (target.has_value() && plausible_code_address(*target)) {
                     walk.call_targets.push_back(*target);
                     walk.valid = true;
                     walk.end = vram + 8;
@@ -219,8 +244,31 @@ uint32_t skip_padding(const Rom &rom, const SectionInfo &section, uint32_t vram)
 /// Everything found in one section, keyed on where each function starts.
 struct Recovered {
     std::map<uint32_t, uint32_t> functions; // start -> end
+    std::map<uint32_t, std::string> names;  // start -> libultra name, where known
     uint32_t text_end = 0;
 };
+
+/// Every address in this section that a `jal` names.
+///
+/// A call target is the strongest statement the image makes about where a
+/// function begins -- stronger than anything inferred by walking, and on a par
+/// with a signature match. Collected once because it is wanted twice: to score
+/// the boundaries, and to protect them from being merged away.
+std::set<uint32_t> collect_call_targets(const Rom &rom, const SectionInfo &section,
+                                        uint32_t text_end) {
+    std::set<uint32_t> targets;
+    for (uint32_t vram = section.vram; vram < text_end; vram += 4) {
+        const uint32_t word = rom.word(section.rom + (vram - section.vram));
+        if ((word >> 26) != 0x03) { // jal
+            continue;
+        }
+        const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+        if (target >= section.vram && target < text_end) {
+            targets.insert(target);
+        }
+    }
+    return targets;
+}
 
 /// Phase one: follow calls out from the section's entry point.
 ///
@@ -329,8 +377,272 @@ void sweep(const Rom &rom, const SectionInfo &section, Recovered &out, AnalysisR
     }
 }
 
+/// Name the libultra functions in a section, and fix its boundaries while we
+/// are at it.
+///
+/// A signature match is worth more than a name. It is the only place in this
+/// whole analysis where something external states, rather than infers, that a
+/// function begins at an address and is exactly this many bytes long. So a
+/// match also corrects the boundary it landed on, and creates one where the
+/// walk had found nothing.
+///
+/// Every 4-aligned address is tried, not only the starts already found. The
+/// functions most worth naming are the ones nothing calls directly -- a thread
+/// entry point handed to osCreateThread, an interrupt handler installed by
+/// address -- and those are precisely the ones the call graph misses.
+void name_from_signatures(const Rom &rom, const SectionInfo &section,
+                          const n64sig::Database &signatures, const RuntimeProvides *provides,
+                          Recovered &out, AnalysisReport &report) {
+    if (out.text_end <= section.vram) {
+        return;
+    }
+
+    // A window of the section's words, in host order, so the matcher can work
+    // on plain memory rather than re-reading the ROM word by word.
+    const size_t words = (out.text_end - section.vram) / 4;
+    std::vector<uint32_t> code(words);
+    for (size_t i = 0; i < words; i++) {
+        code[i] = rom.word(section.rom + i * 4);
+    }
+
+    // Where a match already claims bytes, so a second signature cannot be
+    // matched inside the body of the first.
+    std::vector<bool> claimed(words, false);
+
+    for (size_t i = 0; i < words; i++) {
+        if (claimed[i]) {
+            continue;
+        }
+        const std::vector<const n64sig::Signature *> candidates =
+            signatures.candidates(code.data() + i, words - i);
+        if (candidates.empty()) {
+            continue;
+        }
+
+        const n64sig::Signature *best = nullptr;
+        for (const n64sig::Signature *candidate : candidates) {
+            if (!n64sig::Database::matches(*candidate, code.data() + i, words - i)) {
+                continue;
+            }
+            // Two library functions can share a prefix; the longer match is the
+            // one that explains more of the image.
+            if (best == nullptr || candidate->words.size() > best->words.size()) {
+                best = candidate;
+            }
+        }
+        if (best == nullptr) {
+            continue;
+        }
+
+        const uint32_t vram = section.vram + uint32_t(i * 4);
+        const uint32_t size = uint32_t(best->size_bytes());
+
+        if (!out.functions.count(vram)) {
+            report.named_new_boundaries++;
+        }
+        // The signature knows the real extent, so it replaces whatever the walk
+        // decided -- including splitting a function the walk ran together with
+        // its neighbour. That is worth taking even when the name is not.
+        out.functions[vram] = vram + size;
+
+        // Keep the name only if the runtime has something to put in this
+        // function's place. The recompiler stops emitting a body for any name
+        // it recognises, so naming a function nothing implements trades a
+        // translation that works for a link error. Left nameless, the function
+        // is recompiled from the ROM like any other -- and if it turns out to
+        // drive hardware, the stub pass below catches it.
+        if (provides != nullptr && provides->count(best->name) == 0) {
+            report.names_without_implementations++;
+        } else {
+            out.names[vram] = best->name;
+            report.named_functions++;
+        }
+
+        for (size_t w = i; w < i + best->words.size() && w < words; w++) {
+            claimed[w] = true;
+        }
+        i += best->words.size() - 1;
+    }
+}
+
+/// Make every function contain its own branches.
+///
+/// A relative branch never leaves the function it is in -- except as a tail
+/// call to the top of another one, which the recompiler recognises. Anything
+/// else is a boundary this analysis invented, and the recompiler refuses to
+/// translate the function rather than guess.
+///
+/// Switch statements are what invent them. A `jr $v0` dispatch sends control
+/// into case bodies through a table in rodata, and a table is not a branch, so
+/// nothing in the instruction stream connects the dispatch to the cases. The
+/// walk reaches a `jr $ra` at the end of one case, concludes the function has
+/// ended, and reads the next case as a new function -- which then branches
+/// backwards into the shared code above it, and the recompiler stops.
+///
+/// Parsing the jump tables would find the cases properly and is what a
+/// disassembler with time on its hands would do. This gets the same result from
+/// the other end: wherever a branch crosses a boundary, the boundary was wrong,
+/// so dissolve it. Merging can expose further crossings as the ranges grow, so
+/// it repeats until nothing moves.
+void enforce_branch_containment(const Rom &rom, const SectionInfo &section, uint32_t text_end,
+                                const std::set<uint32_t> &call_targets, Recovered &out,
+                                AnalysisReport &report) {
+    constexpr int kMaxPasses = 8;
+
+    for (int pass = 0; pass < kMaxPasses; pass++) {
+        std::vector<uint32_t> starts;
+        starts.reserve(out.functions.size());
+        for (const auto &entry : out.functions) {
+            starts.push_back(entry.first);
+        }
+        if (starts.size() < 2) {
+            return;
+        }
+        const std::set<uint32_t> start_set(starts.begin(), starts.end());
+        std::set<uint32_t> doomed;
+
+        for (size_t i = 0; i < starts.size(); i++) {
+            const uint32_t begin = starts[i];
+            const uint32_t end = (i + 1 < starts.size()) ? starts[i + 1] : text_end;
+
+            for (uint32_t vram = begin; vram < end; vram += 4) {
+                const uint32_t word = rom.word(section.rom + (vram - section.vram));
+                const rabbitizer::InstructionCpu insn(word, vram);
+                if (!insn.isValid() || !insn.isBranch()) {
+                    continue;
+                }
+                const uint32_t target = uint32_t(insn.getBranchVramGeneric());
+                if (target >= begin && target < end) {
+                    continue; // inside this function, which is the normal case
+                }
+                if (target < section.vram || target >= text_end) {
+                    continue; // outside the recovered code; not a boundary question
+                }
+                if (start_set.count(target) != 0) {
+                    continue; // the top of another function, which is a tail call
+                }
+
+                // The branch lands in the middle of some other function, so the
+                // two are really one. Dissolve every boundary between them.
+                const size_t other =
+                    size_t(std::upper_bound(starts.begin(), starts.end(), target) -
+                           starts.begin()) - 1;
+                const size_t from = std::min(i, other);
+                const size_t to = std::max(i, other);
+                for (size_t k = from + 1; k <= to; k++) {
+                    doomed.insert(starts[k]);
+                }
+            }
+        }
+
+        size_t removed = 0;
+        for (uint32_t start : doomed) {
+            // Two kinds of boundary outrank this pass, because both were
+            // stated by the image rather than inferred from it: one a
+            // signature matched, and one a `jal` points at. Dissolving a call
+            // target would also be self-defeating -- the recompiler would
+            // rediscover it while translating, as a function this analysis
+            // never saw and so never checked for anything.
+            if (out.names.count(start) != 0 || call_targets.count(start) != 0 ||
+                start == section.vram) {
+                continue;
+            }
+            out.functions.erase(start);
+            removed++;
+        }
+        report.merged_boundaries += removed;
+        if (removed == 0) {
+            return;
+        }
+    }
+
+    report.notes.push_back("branch containment in " + section.name +
+                           " did not settle; some functions may still be split wrongly");
+}
+
+/// Does a branch still leave this function, after merging has done what it can?
+///
+/// Merging fixes the boundaries this analysis invented. What it cannot fix is a
+/// region that has no correct division into functions: hand-written assembly
+/// with several entry points sharing one body. libultra's exception preamble is
+/// the example every game carries -- fifteen `jal`s arrive at an address in the
+/// middle of a block whose code branches freely above and below it, so the
+/// address is certainly a function start and just as certainly not the top of
+/// anything self-contained.
+///
+/// The recompiler will not translate that, and it is right not to. Stubbing is
+/// the alternative to failing the build over it, and for this particular region
+/// it is also correct, since the runtime handles exceptions itself. Where it is
+/// not correct it is at least visible: every one is counted and reported.
+bool branches_escape(const Rom &rom, const SectionInfo &section,
+                     const std::set<uint32_t> &starts, uint32_t text_end,
+                     const FunctionRange &function) {
+    const uint32_t end = function.vram + function.size;
+    for (uint32_t vram = function.vram; vram < end; vram += 4) {
+        const uint32_t word = rom.word(section.rom + (vram - section.vram));
+        const rabbitizer::InstructionCpu insn(word, vram);
+        if (!insn.isValid() || !insn.isBranch()) {
+            continue;
+        }
+        const uint32_t target = uint32_t(insn.getBranchVramGeneric());
+        if (target >= function.vram && target < end) {
+            continue;
+        }
+        if (target < section.vram || target >= text_end) {
+            continue;
+        }
+        if (starts.count(target) != 0) {
+            continue; // a tail call, which the recompiler handles
+        }
+        return true;
+    }
+    return false;
+}
+
+/// Does this function drive coprocessor 0 in a way the recompiler cannot
+/// translate?
+///
+/// COP0 is the CPU's control registers -- the TLB, the interrupt mask, the
+/// cycle counter. The recompiler translates exactly one of them, Status, and
+/// refuses the rest, which is correct: there is no TLB behind a flat block of
+/// host memory and no meaning to writing one.
+///
+/// A decompilation never hits this, because every function that touches COP0
+/// is a libultra function, and libultra is named in the elf and substituted by
+/// the runtime. From recovered symbols it only stays true for the functions a
+/// signature managed to name. The rest -- osUnmapTLBAll being the one Super
+/// Mario 64 lands on -- arrive nameless and get translated.
+///
+/// Stubbing them is right rather than merely expedient. The unit here is the
+/// function, and a function full of COP0 is a hardware routine in its
+/// entirety; a no-op TLB unmap against memory that was never mapped is exactly
+/// what it should do. What would not be right is inventing values for COP0
+/// reads mid-function and hoping the surrounding code copes.
+///
+/// Every one of these is still a gap, so they are counted and reported. The
+/// way to close one is to widen the signature database until it has a name.
+bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange &function) {
+    for (uint32_t offset = 0; offset < function.size; offset += 4) {
+        const uint32_t vram = function.vram + offset;
+        const uint32_t word = rom.word(section.rom + (vram - section.vram));
+        if ((word >> 26) != 0x10) { // not COP0
+            continue;
+        }
+        const uint32_t rs = (word >> 21) & 0x1F;
+        const uint32_t rd = (word >> 11) & 0x1F;
+        constexpr uint32_t kCop0Status = 12;
+        const bool is_move = (rs == 0x00 /* mfc0 */) || (rs == 0x04 /* mtc0 */);
+        if (is_move && rd == kCop0Status) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
 void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &report,
-                       uint32_t entry) {
+                       uint32_t entry, const n64sig::Database *signatures,
+                       const RuntimeProvides *provides) {
     report.words_scanned += section.size / 4;
 
     Recovered recovered;
@@ -340,6 +652,13 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         return;
     }
     sweep(rom, section, recovered, report);
+    if (signatures != nullptr) {
+        name_from_signatures(rom, section, *signatures, provides, recovered, report);
+    }
+
+    const std::set<uint32_t> call_targets =
+        collect_call_targets(rom, section, recovered.text_end);
+    enforce_branch_containment(rom, section, recovered.text_end, call_targets, recovered, report);
 
     section.text_size = recovered.text_end - section.vram;
     // Round out to a code block so the section boundary falls where the
@@ -360,8 +679,31 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         if (end <= it->first) {
             continue;
         }
-        section.functions.push_back(FunctionRange{it->first, end - it->first});
+        auto named = recovered.names.find(it->first);
+        section.functions.push_back(FunctionRange{
+            it->first, end - it->first,
+            named == recovered.names.end() ? std::string() : named->second});
     }
+    // A named function is the runtime's problem, not ours: the recompiler
+    // substitutes its own implementation for every libultra name it knows. Only
+    // the ones no signature reached need stubbing.
+    std::set<uint32_t> final_starts;
+    for (const FunctionRange &function : section.functions) {
+        final_starts.insert(function.vram);
+    }
+    for (FunctionRange &function : section.functions) {
+        if (!function.name.empty()) {
+            continue;
+        }
+        if (needs_stub(rom, section, function)) {
+            function.stub = true;
+            report.stubbed_functions++;
+        } else if (branches_escape(rom, section, final_starts, text_end_vram, function)) {
+            function.stub = true;
+            report.stubbed_unstructured++;
+        }
+    }
+
     report.functions_found += section.functions.size();
 
     // Now that .text has a boundary, every call in it can be scored. A call
@@ -459,7 +801,8 @@ bool looks_like_code(const Rom &rom, const OverlayCandidate &entry) {
     return total > 0 && has_return && (valid * 10) >= (total * 9);
 }
 
-void find_overlays(const Rom &rom, Analysis &analysis) {
+void find_overlays(const Rom &rom, Analysis &analysis, const n64sig::Database *signatures,
+                   const RuntimeProvides *provides) {
     if (analysis.sections.empty()) {
         return;
     }
@@ -508,7 +851,7 @@ void find_overlays(const Rom &rom, Analysis &analysis) {
         overlay.rom = entry.rom_start;
         overlay.vram = entry.vram_start;
         overlay.size = entry.rom_end - entry.rom_start;
-        recover_functions(rom, overlay, analysis.report, overlay.vram);
+        recover_functions(rom, overlay, analysis.report, overlay.vram, signatures, provides);
         if (overlay.functions.empty()) {
             continue;
         }
@@ -523,7 +866,26 @@ void find_overlays(const Rom &rom, Analysis &analysis) {
 
 } // namespace
 
-Analysis analyze(const Rom &rom) {
+bool load_runtime_provides(const std::string &path, RuntimeProvides &out, std::string &error) {
+    std::ifstream file(path);
+    if (!file) {
+        error = "could not open " + path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        if (!line.empty() && line[0] != '#') {
+            out.insert(line);
+        }
+    }
+    return true;
+}
+
+Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
+                 const RuntimeProvides *provides) {
     Analysis analysis;
 
     SectionInfo boot;
@@ -532,7 +894,7 @@ Analysis analyze(const Rom &rom) {
     boot.vram = rom.load_address;
     boot.size = uint32_t(std::min<size_t>(
         kBootCopySize, rom.size() > kBootRomOffset ? rom.size() - kBootRomOffset : 0));
-    recover_functions(rom, boot, analysis.report, rom.load_address);
+    recover_functions(rom, boot, analysis.report, rom.load_address, signatures, provides);
 
     // The section is narrowed to the code once we know where it ends. The
     // recompiler sizes the last function it discovers for itself against the
@@ -549,7 +911,7 @@ Analysis analyze(const Rom &rom) {
             "the recovered addresses may all be off by a fixed amount");
     }
 
-    find_overlays(rom, analysis);
+    find_overlays(rom, analysis, signatures, provides);
     return analysis;
 }
 

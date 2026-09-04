@@ -15,6 +15,55 @@ index e7b4431..d34d32e 100644
  
          //// Only used by the CLI, TODO move this to a struct in the internal headers.
          // A mapping of function name to index in the functions vector
+diff --git a/src/cgenerator.cpp b/src/cgenerator.cpp
+index 94f85c5..eb655c6 100644
+--- a/src/cgenerator.cpp
++++ b/src/cgenerator.cpp
+@@ -562,6 +562,16 @@ void N64Recomp::CGenerator::emit_comment(const std::string& comment) const {
+     fmt::print(output_file, "// {}\n", comment);
+ }
+ 
++// Writing to $zero is a no-op on this hardware -- the register reads as zero
++// however it is assigned -- and `lw $zero, 0(a0)` is a real idiom, used to
++// touch a cache line or hold a load slot. The generator renders $zero as the
++// literal 0, so the natural output is `0 = MEM_W(...)`, which no C compiler
++// will take. Discard the result but keep the expression, which is what the
++// instruction does.
++static bool writes_to_zero(const std::string& output) {
++    return output == "0";
++}
++
+ void N64Recomp::CGenerator::process_binary_op(const BinaryOp& op, const InstructionContext& ctx) const {
+     // Thread local variables to prevent allocations when possible.
+     // TODO these thread locals probably don't actually help right now, so figure out a better way to prevent allocations.
+@@ -569,7 +579,12 @@ void N64Recomp::CGenerator::process_binary_op(const BinaryOp& op, const Instruct
+     thread_local std::string expression{};
+     get_operand_string(op.output, UnaryOpType::None, ctx, output);
+     get_binary_expr_string(op.type, op.operands, ctx, output, expression);
+-    fmt::print(output_file, "{} = {};\n", output, expression);
++    if (writes_to_zero(output)) {
++        fmt::print(output_file, "(void)({});\n", expression);
++    }
++    else {
++        fmt::print(output_file, "{} = {};\n", output, expression);
++    }
+ }
+ 
+ void N64Recomp::CGenerator::process_unary_op(const UnaryOp& op, const InstructionContext& ctx) const {
+@@ -579,7 +594,12 @@ void N64Recomp::CGenerator::process_unary_op(const UnaryOp& op, const Instructio
+     thread_local std::string input{};
+     get_operand_string(op.output, UnaryOpType::None, ctx, output);
+     get_operand_string(op.input, op.operation, ctx, input);
+-    fmt::print(output_file, "{} = {};\n", output, input);
++    if (writes_to_zero(output)) {
++        fmt::print(output_file, "(void)({});\n", input);
++    }
++    else {
++        fmt::print(output_file, "{} = {};\n", output, input);
++    }
+ }
+ 
+ void N64Recomp::CGenerator::process_store_op(const StoreOp& op, const InstructionContext& ctx) const {
 diff --git a/src/config.cpp b/src/config.cpp
 index 1066aff..0c1f8fc 100644
 --- a/src/config.cpp
@@ -46,7 +95,7 @@ index 7d6db23..0ec2e7a 100644
          bool strict_patch_mode;
          std::filesystem::path elf_path;
 diff --git a/src/main.cpp b/src/main.cpp
-index f79580f..1698bd1 100644
+index f79580f..1cda37f 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -526,6 +526,7 @@ int main(int argc, char** argv) {
@@ -57,6 +106,21 @@ index f79580f..1698bd1 100644
  
      // Apply any single-instruction patches.
      for (const N64Recomp::InstructionPatch& patch : config.instruction_patches) {
+@@ -760,7 +761,13 @@ int main(int argc, char** argv) {
+                 fmt::print(stderr, "Error recompiling {}\n", func.name);
+                 std::exit(EXIT_FAILURE);
+             }
+-        } else if (func.reimplemented) {
++        } else {
++            // Declare every function whose body is not being emitted, not only
++            // the reimplemented ones. An ignored function is still called from
++            // the recompiled code, so without a declaration the output does not
++            // compile under any C standard since C99. A project driving the
++            // recompiler by hand can write the declaration itself; one built
++            // from recovered symbols has nowhere to write it.
+             fmt::print(func_header_file,
+                        "void {}(uint8_t* rdram, recomp_context* ctx);\n", func.name);
+         }
 diff --git a/src/recompilation.cpp b/src/recompilation.cpp
 index c228433..5625641 100644
 --- a/src/recompilation.cpp

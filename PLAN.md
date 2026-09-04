@@ -177,15 +177,33 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | N64Recomp builds on macOS arm64 | done — Apple clang 17 |
 | N64ModernRuntime builds on macOS arm64 | done — ultramodern + librecomp link |
 | RT64 builds on macOS arm64 | done — `rt64.dylib`, native Metal backend |
-| `n64rip` boundary recovery | done — 99.7% of Super Mario 64's calls land on a recovered boundary |
-| N64Recomp accepts the recovered metadata | done, with one patch: unresolved calls fall back to runtime lookup |
-| `n64sig` — naming libultra by signature | next, and the blocker on anything running |
-| module ABI and `n64b-port` | not started |
+| `n64rip` boundary recovery | done — 100% of Super Mario 64's internal calls land on a recovered boundary |
+| `n64sig` libultra naming | done — fingerprints a `libultra*.a` and names what it finds in a ROM |
+| **A bare ROM recompiles to native arm64** | **done** — Super Mario 64 (USA), 3,889 functions, 21MB of C, 3.6MB of Mach-O arm64 in about a second |
+| module ABI and `n64b-port` | next |
 | `n64b-run` host | not started |
 | `recompn64` pipeline | not started |
 | Dioxus window | not started |
 | `.app` packaging | not started |
 | per-title records | not started |
+
+### Where Super Mario 64 stands
+
+```
+3,889 functions recovered: 29 by following calls, 3,862 by sweeping
+10,336 of 10,336 internal calls land on a function boundary (100.00%)
+35 functions named from libultra signatures
+9 functions stubbed: they drive coprocessor 0 and no signature named them
+1 function stubbed: hand-written assembly that does not divide into functions
+1 boundary merged where a branch crossed it
+1,207 calls point outside every section found; that code was not recompiled
+```
+
+The last line is the honest one. Those 1,207 calls go to Super Mario 64's
+overlays, which it addresses through linker symbols rather than a table, so
+nothing here finds them. The boot segment is recompiled and the rest is not,
+which is exactly the coverage limit this design predicted and exactly what a
+title record exists to fix.
 
 ### The second gap: libultra has to be named
 

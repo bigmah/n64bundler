@@ -19,10 +19,13 @@
 #ifndef N64RIP_HPP
 #define N64RIP_HPP
 
+#include "signature.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace n64rip {
@@ -101,6 +104,14 @@ std::optional<Rom> load_rom(const std::string &path, std::string &error);
 struct FunctionRange {
     uint32_t vram = 0;
     uint32_t size = 0; // bytes, always a multiple of 4
+    /// The libultra name, when a signature matched here. Empty means the
+    /// function gets named after its address, because nothing in the image
+    /// says what it was called.
+    std::string name;
+    /// Whether this function drives coprocessor 0 in ways the recompiler
+    /// cannot translate, and has to be stubbed. See needs_stub() for why that
+    /// is the right answer and when it stops being needed.
+    bool stub = false;
 };
 
 struct SectionInfo {
@@ -135,6 +146,31 @@ struct AnalysisReport {
     size_t calls_on_boundary = 0;
     size_t calls_off_boundary = 0;
 
+    /// Functions a libultra signature named. These are the ones that matter
+    /// most: the recompiler substitutes the runtime's own implementation for
+    /// each name it recognises, so naming them is what keeps libultra's
+    /// hardware code from being translated and run.
+    size_t named_functions = 0;
+    /// Signature matches that landed somewhere the walk had not identified as
+    /// a function at all.
+    size_t named_new_boundaries = 0;
+    /// Functions stubbed because they touch hardware the runtime does not
+    /// model and no signature named them. Each one is a place a wider
+    /// signature database would do better.
+    size_t stubbed_functions = 0;
+    /// Signature matches whose name was thrown away because the runtime has no
+    /// implementation to put in the function's place. These are recompiled
+    /// from the ROM like any other function.
+    size_t names_without_implementations = 0;
+    /// Boundaries dissolved because a branch crossed them. Each one was a
+    /// switch statement whose cases the walk mistook for separate functions.
+    size_t merged_boundaries = 0;
+    /// Functions stubbed because a branch still leaves them after merging.
+    /// These are hand-written assembly with several entry points sharing a
+    /// body -- libultra's exception preamble is the one every game has -- and
+    /// they do not divide into functions at all.
+    size_t stubbed_unstructured = 0;
+
     std::vector<std::string> notes;
 };
 
@@ -143,8 +179,27 @@ struct Analysis {
     AnalysisReport report;
 };
 
-/// Recover sections and functions from a loaded ROM.
-Analysis analyze(const Rom &rom);
+/// What the runtime can stand in for.
+///
+/// Naming a libultra function is only useful if something implements it. The
+/// recompiler reacts to a name it recognises by not emitting the function's
+/// body at all, on the understanding that the runtime supplies one -- so a name
+/// the runtime does not implement turns a working translation into a link
+/// error, which is a worse outcome than never having named it.
+///
+/// The set is not guessed. build.sh reads it out of the built runtime with
+/// `nm`, so it is exactly the list of `<name>_recomp` symbols that exist.
+using RuntimeProvides = std::unordered_set<std::string>;
+
+/// Read that list, one name per line. Returns false with `error` set if the
+/// file cannot be read.
+bool load_runtime_provides(const std::string &path, RuntimeProvides &out, std::string &error);
+
+/// Recover sections and functions from a loaded ROM. With a signature database,
+/// libultra functions are additionally named, which is what lets the recompiler
+/// substitute the runtime's implementations for them.
+Analysis analyze(const Rom &rom, const n64sig::Database *signatures = nullptr,
+                 const RuntimeProvides *provides = nullptr);
 
 // ---------------------------------------------------------------------------
 // Output

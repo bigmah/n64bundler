@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <sstream>
+#include <vector>
 
 namespace n64rip {
 namespace {
@@ -55,8 +56,13 @@ std::string emit_symbols_toml(const Rom &rom, const Analysis &analysis) {
             << "size = " << hex(section.size) << "\n\n";
 
         for (const FunctionRange &function : section.functions) {
+            // A libultra name is not decoration: the recompiler matches on it
+            // to substitute the runtime's own implementation. Everything else
+            // is named after where it lives, since the image says no more.
+            const std::string name =
+                function.name.empty() ? ("func_" + hex(function.vram).substr(2)) : function.name;
             out << "[[section.functions]]\n"
-                << "name = \"func_" << hex(function.vram).substr(2) << "\"\n"
+                << "name = " << quote(name) << "\n"
                 << "vram = " << hex(function.vram) << "\n"
                 << "size = " << hex(function.size, 1) << "\n\n";
         }
@@ -67,7 +73,6 @@ std::string emit_symbols_toml(const Rom &rom, const Analysis &analysis) {
 std::string emit_recomp_toml(const Rom &rom, const Analysis &analysis,
                              const std::string &symbols_path, const std::string &rom_path,
                              const std::string &output_dir) {
-    (void)analysis;
     std::ostringstream out;
     out << "# Written by n64rip.\n"
         << "[input]\n"
@@ -84,6 +89,30 @@ std::string emit_recomp_toml(const Rom &rom, const Analysis &analysis,
         // runtime rather than refusing to build the game at all.
         << "lookup_unresolved_function_calls = true\n"
         << "recomp_include = \"#include \\\"recomp.h\\\"\"\n";
+
+    // Functions that drive coprocessor 0 and that no signature named. See
+    // needs_stub() in analyze.cpp for why the whole function goes rather than
+    // the instruction.
+    std::vector<std::string> stubs;
+    for (const SectionInfo &section : analysis.sections) {
+        for (const FunctionRange &function : section.functions) {
+            // Only unnamed functions are ever stubbed; a named one is already
+            // being replaced by the runtime, and the recompiler rejects a stub
+            // naming a function it has renamed.
+            if (function.stub && function.name.empty()) {
+                stubs.push_back("func_" + hex(function.vram).substr(2));
+            }
+        }
+    }
+    if (!stubs.empty()) {
+        out << "\n# Hardware routines the runtime models itself. Each one is a function a\n"
+            << "# wider libultra signature database would have named instead.\n"
+            << "[patches]\nstubs = [\n";
+        for (const std::string &name : stubs) {
+            out << "    " << quote(name) << ",\n";
+        }
+        out << "]\n";
+    }
     return out.str();
 }
 
@@ -121,6 +150,13 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis) {
         << "  \"calls_on_boundary\": " << analysis.report.calls_on_boundary << ",\n"
         << "  \"calls_off_boundary\": " << analysis.report.calls_off_boundary << ",\n"
         << "  \"invalid_words\": " << analysis.report.invalid_words << ",\n"
+        << "  \"named_functions\": " << analysis.report.named_functions << ",\n"
+        << "  \"named_new_boundaries\": " << analysis.report.named_new_boundaries << ",\n"
+        << "  \"stubbed_functions\": " << analysis.report.stubbed_functions << ",\n"
+        << "  \"stubbed_unstructured\": " << analysis.report.stubbed_unstructured << ",\n"
+        << "  \"merged_boundaries\": " << analysis.report.merged_boundaries << ",\n"
+        << "  \"names_without_implementations\": "
+        << analysis.report.names_without_implementations << ",\n"
         << "  \"notes\": [\n";
     for (size_t i = 0; i < analysis.report.notes.size(); i++) {
         out << "    " << quote(analysis.report.notes[i])

@@ -27,7 +27,8 @@ namespace {
 void usage() {
     std::fprintf(stderr,
                  "usage: n64rip inspect <rom>\n"
-                 "       n64rip analyze <rom> --out-dir <dir> [--quiet]\n");
+                 "       n64rip analyze <rom> --out-dir <dir> [--signatures <db>]\n"
+                 "                     [--runtime-provides <list>] [--quiet]\n");
 }
 
 bool write_file(const std::filesystem::path &path, const std::string &contents) {
@@ -71,6 +72,30 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     report.calls_on_boundary, landed,
                     100.0 * double(report.calls_on_boundary) / double(landed));
     }
+    if (report.named_functions > 0) {
+        std::printf("%zu functions named from libultra signatures, %zu of them at boundaries "
+                    "the walk had not found\n",
+                    report.named_functions, report.named_new_boundaries);
+    }
+    if (report.names_without_implementations > 0) {
+        std::printf("%zu signature matches were left nameless: the runtime has no "
+                    "implementation to stand in for them\n",
+                    report.names_without_implementations);
+    }
+    if (report.stubbed_functions > 0) {
+        std::printf("%zu functions stubbed: they drive coprocessor 0 and no signature named "
+                    "them\n",
+                    report.stubbed_functions);
+    }
+    if (report.merged_boundaries > 0) {
+        std::printf("%zu boundaries merged where a branch crossed them\n",
+                    report.merged_boundaries);
+    }
+    if (report.stubbed_unstructured > 0) {
+        std::printf("%zu functions stubbed: hand-written assembly that does not divide into "
+                    "functions\n",
+                    report.stubbed_unstructured);
+    }
     if (report.calls_outside > 0) {
         std::printf("%zu calls point outside every section found; that code was not "
                     "recompiled\n",
@@ -92,12 +117,18 @@ int main(int argc, char **argv) {
     const std::string command = argv[1];
     const std::string rom_path = argv[2];
     std::string out_dir;
+    std::string signatures_path;
+    std::string provides_path;
     bool quiet = false;
 
     for (int i = 3; i < argc; i++) {
         const std::string arg = argv[i];
         if (arg == "--out-dir" && i + 1 < argc) {
             out_dir = argv[++i];
+        } else if (arg == "--signatures" && i + 1 < argc) {
+            signatures_path = argv[++i];
+        } else if (arg == "--runtime-provides" && i + 1 < argc) {
+            provides_path = argv[++i];
         } else if (arg == "--quiet") {
             quiet = true;
         } else {
@@ -130,7 +161,32 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const n64rip::Analysis analysis = n64rip::analyze(*rom);
+    // Without a signature database the recovered code is nameless, and the
+    // recompiler will translate libultra's own hardware routines rather than
+    // substituting the runtime's implementations of them. It builds; it does
+    // not get far.
+    n64sig::Database signatures;
+    bool have_signatures = false;
+    if (!signatures_path.empty()) {
+        if (!signatures.load(signatures_path, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        have_signatures = true;
+    }
+
+    n64rip::RuntimeProvides provides;
+    bool have_provides = false;
+    if (!provides_path.empty()) {
+        if (!n64rip::load_runtime_provides(provides_path, provides, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        have_provides = true;
+    }
+
+    const n64rip::Analysis analysis = n64rip::analyze(
+        *rom, have_signatures ? &signatures : nullptr, have_provides ? &provides : nullptr);
     if (analysis.sections.empty() || analysis.sections.front().functions.empty()) {
         std::fprintf(stderr,
                      "error: no code was recovered from this ROM. It may be encrypted, "

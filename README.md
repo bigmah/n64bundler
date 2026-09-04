@@ -60,14 +60,31 @@ to accept a ROM nobody has decompiled. So it recovers the metadata itself:
 - **`n64rip`** reads the image, identifies the boot chip, works out where the
   boot segment really lands, and recovers function boundaries by following
   calls out from the entry point and then sweeping the code that proves is
-  there. On Super Mario 64 (USA) it recovers 3,888 functions, and 99.7% of the
+  there. On Super Mario 64 (USA) it recovers about 3,890 functions, and 100% of the
   ROM's internal calls land exactly on one of them — which is the check,
   since a `jal` always names the first instruction of a function.
+
+- **`n64sig`** puts names back on the libultra functions inside the ROM. That
+  matters more than it sounds like it should: a game calls `osCreateThread` and
+  two hundred others, none of which can run as recompiled MIPS because they
+  drive hardware that is not there. The runtime reimplements all of it and
+  N64Recomp already knows to substitute those implementations — it just needs
+  the names, which an elf would have supplied. libultra shipped as a static
+  library, so its functions are byte-identical in every game linked against the
+  same version, and fingerprinting them is the same problem IDA's FLIRT
+  signatures solve.
 
 What it cannot recover, it says so about. Overlays — code the game DMAs out of
 the ROM at runtime — are only found when the game tabulates them, and a title
 that computes its segment addresses in code instead has to have them written
 down in a record under `N64Bundler/titles/<ID>/`.
+
+Between them, Super Mario 64 recompiles from the cartridge dump alone into
+3.6MB of native arm64 — 3,889 functions, in about a second of compiling. Of
+those, 10 are stubbed: nine drive coprocessor 0 and one is libultra's exception
+preamble, which has no correct division into functions at all. 1,207 calls
+leave the code that was recovered, and those go to the overlays nothing here
+finds.
 
 **So: a game that boots is not a game that finishes, and some ROMs will not
 boot at all.** That is the honest state of it, and the per-title records exist
@@ -79,6 +96,19 @@ to close the gap one title at a time.
 bring your own dump of a cartridge you own. ROMs are `.gitignore`d. The
 per-title records under `N64Bundler/titles/` are measurements — addresses,
 sizes, and a hash — never bytes of a game.
+
+**No libultra ships here either.** Naming the library functions inside a ROM
+means comparing them against libultra's own binaries, and those are Nintendo's.
+`n64sig` builds the signature database; it does not come with one. Point
+`N64_LIBULTRA` at the `libultra*.a` from a decompilation project you have set
+up:
+
+```sh
+N64_LIBULTRA="/path/to/decomp/lib/n64/libultra*.a" ./N64Bundler/build.sh
+```
+
+Without it a ROM still recompiles — it just does so with libultra's own
+hardware routines translated rather than replaced, which does not get far.
 
 ## License
 

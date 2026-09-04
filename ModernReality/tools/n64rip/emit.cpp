@@ -148,6 +148,25 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
     }
 
     out << "  ],\n"
+        << "  \"microcode\": [\n";
+
+    // What the module has to recompile for the signal processor, and where the
+    // game loads it -- which is how the module picks between blocks, since the
+    // task names its microcode by address.
+    for (size_t i = 0; i < analysis.microcode.size(); i++) {
+        const MicrocodeInfo &block = analysis.microcode[i];
+        out << "    { \"name\": " << quote(block.name) << ", \"rom\": " << quote(hex(block.rom))
+            << ", \"vram\": " << quote(hex(block.vram)) << ", \"size\": " << quote(hex(block.size))
+            << ", \"text_address\": " << quote(hex(block.text_address))
+            << ", \"cop2\": " << int(block.cop2_density * 100.0 + 0.5)
+            << ", \"branch_targets\": [";
+        for (size_t t = 0; t < block.branch_targets.size(); t++) {
+            out << (t == 0 ? "" : ", ") << quote(hex(block.branch_targets[t]));
+        }
+        out << "] }" << (i + 1 < analysis.microcode.size() ? "," : "") << "\n";
+    }
+
+    out << "  ],\n"
         << "  \"functions\": " << analysis.report.functions_found << ",\n"
         << "  \"from_sweep\": " << analysis.report.from_sweep << ",\n"
         << "  \"from_calls\": " << analysis.report.from_calls << ",\n"

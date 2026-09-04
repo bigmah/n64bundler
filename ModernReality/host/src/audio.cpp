@@ -17,6 +17,7 @@
 #include <SDL.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 
 namespace n64b {
@@ -48,6 +49,38 @@ void audio_callback(void *userdata, uint8_t *out, int length) {
     }
 }
 
+/// The loudest sample in the last second, when `N64B_LEVELS` is set.
+///
+/// The same argument the screenshot is here for. Whether a game is making a
+/// sound is a thing you find out by listening, and listening is not something
+/// a script, a log, or a machine with its output muted can do. A game whose
+/// microcode did not run hands over a buffer of zeros forever, and a game
+/// whose microcode ran hands over something that is not zeros -- so the peak
+/// is the whole answer, and it costs one comparison per sample to have it.
+void report_level(const int16_t *samples, size_t sample_count) {
+    static const bool wanted = std::getenv("N64B_LEVELS") != nullptr;
+    if (!wanted) {
+        return;
+    }
+    static int16_t peak = 0;
+    static size_t counted = 0;
+    for (size_t i = 0; i < sample_count; i++) {
+        const int16_t magnitude = int16_t(samples[i] < 0 ? -(samples[i] + 1) : samples[i]);
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
+    counted += sample_count;
+    // Once a second at the game's own rate, whatever that is.
+    if (counted < size_t(game_frequency) * kChannels) {
+        return;
+    }
+    std::fprintf(stderr, "audio: peak %5d of 32767 over %zu samples at %d Hz\n", int(peak),
+                 counted, game_frequency);
+    peak = 0;
+    counted = 0;
+}
+
 /// ultramodern counts what it hands over in samples -- one 16-bit value, half
 /// of a stereo frame -- and asks for what is left in frames. Getting that the
 /// wrong way round puts twice as much audio in as comes out, so the buffer
@@ -55,6 +88,7 @@ void audio_callback(void *userdata, uint8_t *out, int length) {
 /// building the next frame waits forever. Mario Builder 64 stopped after
 /// nineteen of them.
 void queue_samples(int16_t *samples, size_t sample_count) {
+    report_level(samples, sample_count);
     std::lock_guard<std::mutex> lock(stream_mutex);
     if (stream == nullptr) {
         return;

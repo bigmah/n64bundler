@@ -1359,6 +1359,102 @@ void apply_function_records(Analysis &analysis, const TitleRecord &record) {
 
 } // namespace
 
+/// How much of a block decodes as a coprocessor 2 instruction.
+///
+/// The R4300 has no coprocessor 2, so nothing the CPU runs uses one and no
+/// ordinary code in a cartridge contains one by accident. The signal processor
+/// is all vector unit, and its microcode is dense with them. That makes the
+/// ratio a check on a recorded address: a block that is really microcode reads
+/// well above a tenth, and data that happens to sit at the recorded offset
+/// reads near zero.
+double cop2_density(const Rom &rom, uint32_t offset, uint32_t size) {
+    if (size == 0 || size_t(offset) + size > rom.size()) {
+        return 0.0;
+    }
+    size_t vector_ops = 0;
+    const size_t words = size / 4;
+    for (size_t i = 0; i < words; i++) {
+        const uint32_t opcode = rom.word(offset + uint32_t(i) * 4) >> 26;
+        constexpr uint32_t kCop2 = 0x12;
+        constexpr uint32_t kLwc2 = 0x32;
+        constexpr uint32_t kSwc2 = 0x3A;
+        if (opcode == kCop2 || opcode == kLwc2 || opcode == kSwc2) {
+            vector_ops++;
+        }
+    }
+    return words == 0 ? 0.0 : double(vector_ops) / double(words);
+}
+
+/// Every address inside the text that the microcode's data blob names.
+///
+/// The recompiler turns `jr $reg` into a switch over the labels it emitted, so
+/// a target it did not work out statically is a microcode that stops the first
+/// time the game asks for that command. What it cannot work out is exactly the
+/// interesting case: a microcode dispatches its command list through a table
+/// of halfword addresses that lives in its data blob, and the blob is data --
+/// nothing in the instruction stream points into it.
+///
+/// The blob is small and the rule is self-limiting, which is what makes
+/// reading it safe. A halfword only counts when it is inside the text and
+/// four-byte aligned, and an address is four bytes of the sixty-four thousand
+/// a halfword could hold: the audio microcode's own table has sixteen entries
+/// in range and sixteen out of it -- bit masks, which are not aligned
+/// addresses -- and the masks are rejected without being known to be masks.
+///
+/// A wrong extra target costs a label nobody jumps to. A missing one costs the
+/// game its sound, so the trade runs one way.
+std::vector<uint32_t> harvest_branch_targets(const Rom &rom, const MicrocodeInfo &block) {
+    std::vector<uint32_t> targets;
+    if (block.data_size == 0 || size_t(block.data_rom) + block.data_size > rom.size()) {
+        return targets;
+    }
+    // The signal processor addresses its own memory in thirteen bits, so a
+    // target in a table is 0x1080 rather than 0x04001080, and that is the form
+    // the recompiler labels them in too.
+    constexpr uint32_t kRspMemMask = 0x1FFFu;
+    const uint32_t first = block.text_address & kRspMemMask;
+    const uint32_t last = first + block.size;
+    for (uint32_t offset = 0; offset + 2 <= block.data_size; offset += 2) {
+        // The blob is big-endian like the rest of the image, and a halfword
+        // spans two of its bytes wherever it falls.
+        const uint32_t word = rom.word((block.data_rom + offset) & ~3u);
+        const uint32_t half = ((block.data_rom + offset) & 2u) ? (word & 0xFFFFu) : (word >> 16);
+        if (half >= first && half < last && (half % 4) == 0) {
+            targets.push_back(half);
+        }
+    }
+    std::sort(targets.begin(), targets.end());
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+    return targets;
+}
+
+/// Take the microcode a record names, and say whether it looks like microcode.
+void adopt_microcode(const Rom &rom, Analysis &analysis, const TitleRecord &record) {
+    for (const MicrocodeInfo &recorded : record.microcode) {
+        MicrocodeInfo block = recorded;
+        if (block.vram == 0) {
+            // IPL3 copies the first megabyte of the cartridge to the entry
+            // point, so a block inside that copy has an address already.
+            if (block.rom < kBootRomOffset || block.rom >= kBootRomOffset + kBootCopySize) {
+                analysis.report.notes.push_back(
+                    "record: microcode \"" + block.name +
+                    "\" is outside the boot copy, so its vram has to be recorded too");
+                continue;
+            }
+            block.vram = rom.load_address + (block.rom - kBootRomOffset);
+        }
+        block.cop2_density = cop2_density(rom, block.rom, block.size);
+        constexpr double kLooksLikeMicrocode = 0.10;
+        if (block.cop2_density < kLooksLikeMicrocode) {
+            analysis.report.notes.push_back(
+                "record: microcode \"" + block.name +
+                "\" does not read as RSP code -- too little of it is coprocessor 2");
+        }
+        block.branch_targets = harvest_branch_targets(rom, block);
+        analysis.microcode.push_back(block);
+    }
+}
+
 Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
                  const RuntimeProvides *provides, const TitleRecord *record) {
     Analysis analysis;
@@ -1444,6 +1540,8 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
                   [](const SectionInfo &a, const SectionInfo &b) { return a.rom < b.rom; });
 
         apply_function_records(analysis, *record);
+
+        adopt_microcode(rom, analysis, *record);
 
         analysis.report.notes.push_back("record: " + record->path);
         for (const std::string &note : record->notes) {

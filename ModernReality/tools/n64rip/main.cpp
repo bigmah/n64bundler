@@ -60,6 +60,14 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     section.name.c_str(), section.rom, section.vram, section.size,
                     section.functions.size());
     }
+    if (!analysis.microcode.empty()) {
+        std::printf("\nRSP microcode:\n");
+        for (const n64rip::MicrocodeInfo &block : analysis.microcode) {
+            std::printf("  %-10s rom 0x%06X  vram 0x%08X  %5u bytes  %.0f%% coprocessor 2\n",
+                        block.name.c_str(), block.rom, block.vram, block.size,
+                        block.cop2_density * 100.0);
+        }
+    }
     const n64rip::AnalysisReport &report = analysis.report;
     std::printf("\n%zu functions recovered: %zu by following calls, %zu by sweeping\n",
                 report.functions_found, report.from_calls, report.from_sweep);

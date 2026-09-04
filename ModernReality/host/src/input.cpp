@@ -15,10 +15,13 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace n64b {
@@ -102,6 +105,114 @@ void poll_input() {
     // state is updated from there. Nothing to do here.
 }
 
+// --- a pad a script can hold ------------------------------------------------
+//
+// The same argument the screenshot is here for. A window is the real answer to
+// "does this game play", and a window is no answer at all to a script, a log,
+// or a machine whose screen is locked -- and unlike a frame, a game past its
+// title screen cannot be reached by waiting. Something has to press Start.
+//
+// `N64B_INPUT` is a list of `<frame>:<buttons>` separated by commas, and each
+// entry holds until the next one:
+//
+//     N64B_INPUT="90:start,94:,150:a,154:,200:up"
+//
+// The names are the pad's own -- a b z start l r, du dd dl dr for the d-pad,
+// cu cd cl cr for the C buttons -- joined with `+`, and up down left right
+// push the analog stick. An empty list of buttons releases everything, which
+// is what makes a press a press rather than a hold. Frames are counted in
+// reads of controller one, which is once per frame in every game that polls
+// the way libultra intends.
+
+struct ScriptedFrame {
+    unsigned long at;
+    uint16_t buttons;
+    float x, y;
+};
+
+std::vector<ScriptedFrame> scripted;
+unsigned long scripted_reads = 0;
+
+/// Parse `N64B_INPUT` once, into frames sorted by when they start.
+const std::vector<ScriptedFrame> &input_script() {
+    static bool parsed = false;
+    if (parsed) {
+        return scripted;
+    }
+    parsed = true;
+    const char *spec = std::getenv("N64B_INPUT");
+    if (spec == nullptr) {
+        return scripted;
+    }
+    auto token = [](const std::string &name, ScriptedFrame &frame) {
+        static const struct { const char *name; uint16_t bit; } kNames[] = {
+            {"a", kA}, {"b", kB}, {"z", kZ}, {"start", kStart},
+            {"l", kL}, {"r", kR},
+            {"du", kDUp}, {"dd", kDDown}, {"dl", kDLeft}, {"dr", kDRight},
+            {"cu", kCUp}, {"cd", kCDown}, {"cl", kCLeft}, {"cr", kCRight},
+        };
+        for (const auto &known : kNames) {
+            if (name == known.name) {
+                frame.buttons |= known.bit;
+                return true;
+            }
+        }
+        if (name == "up")    { frame.y =  1.0f; return true; }
+        if (name == "down")  { frame.y = -1.0f; return true; }
+        if (name == "left")  { frame.x = -1.0f; return true; }
+        if (name == "right") { frame.x =  1.0f; return true; }
+        return name.empty();
+    };
+
+    const std::string all = spec;
+    size_t at = 0;
+    while (at <= all.size()) {
+        const size_t comma = std::min(all.find(',', at), all.size());
+        const std::string entry = all.substr(at, comma - at);
+        at = comma + 1;
+        const size_t colon = entry.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        ScriptedFrame frame{std::strtoul(entry.c_str(), nullptr, 10), 0, 0.0f, 0.0f};
+        const std::string buttons = entry.substr(colon + 1);
+        size_t part = 0;
+        while (part <= buttons.size()) {
+            const size_t plus = std::min(buttons.find('+', part), buttons.size());
+            if (!token(buttons.substr(part, plus - part), frame)) {
+                std::fprintf(stderr, "note: N64B_INPUT: no button called \"%s\"\n",
+                             buttons.substr(part, plus - part).c_str());
+            }
+            part = plus + 1;
+        }
+        scripted.push_back(frame);
+    }
+    std::sort(scripted.begin(), scripted.end(),
+              [](const ScriptedFrame &a, const ScriptedFrame &b) { return a.at < b.at; });
+    std::fprintf(stderr, "note: playing %zu scripted inputs from N64B_INPUT\n", scripted.size());
+    return scripted;
+}
+
+/// What the script says the pad is holding on this read, if it says anything.
+bool scripted_input(uint16_t *buttons_out, float *x_out, float *y_out) {
+    const std::vector<ScriptedFrame> &script = input_script();
+    if (script.empty()) {
+        return false;
+    }
+    const unsigned long now = scripted_reads++;
+    const ScriptedFrame *current = nullptr;
+    for (const ScriptedFrame &frame : script) {
+        if (frame.at > now) {
+            break;
+        }
+        current = &frame;
+    }
+    *buttons_out = current != nullptr ? current->buttons : uint16_t(0);
+    *x_out = current != nullptr ? current->x : 0.0f;
+    *y_out = current != nullptr ? current->y : 0.0f;
+    return true;
+}
+
 bool get_input(int controller, uint16_t *buttons_out, float *x_out, float *y_out) {
     std::lock_guard<std::mutex> lock(pads_mutex);
     if (controller < 0 || controller >= kMaxControllers) {
@@ -111,6 +222,12 @@ bool get_input(int controller, uint16_t *buttons_out, float *x_out, float *y_out
     uint16_t buttons = 0;
     float x = 0.0f;
     float y = 0.0f;
+
+    // A script holds port one and nothing else, so a second pad still works
+    // beside it and a game that reads four ports still sees three empty.
+    if (controller == 0 && scripted_input(buttons_out, x_out, y_out)) {
+        return true;
+    }
 
     SDL_GameController *pad = pads[size_t(controller)];
     if (pad == nullptr) {

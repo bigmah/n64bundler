@@ -23,6 +23,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <librecomp/game.hpp>
 
@@ -310,13 +312,42 @@ public:
             return;
         }
         // A frame on disk, for when the window cannot be looked at.
+        //
+        // `N64B_SCREENSHOT_AFTER` may name several frames, because what a game
+        // does is a sequence and one still of it is a poor account: a title, a
+        // menu and a level are three runs of a minute each otherwise. With more
+        // than one frame asked for, each file carries the frame it came from.
         if (const char *path = std::getenv("N64B_SCREENSHOT")) {
-            static int until = [] {
+            static const std::vector<unsigned> at = [] {
+                std::vector<unsigned> frames;
                 const char *after = std::getenv("N64B_SCREENSHOT_AFTER");
-                return after != nullptr ? std::atoi(after) : 600;
+                for (const char *scan = after; scan != nullptr && *scan != '\0';) {
+                    char *end = nullptr;
+                    frames.push_back(unsigned(std::strtoul(scan, &end, 10)));
+                    scan = (*end == ',') ? end + 1 : end;
+                    if (end == scan) {
+                        break;
+                    }
+                }
+                if (frames.empty()) {
+                    frames.push_back(600);
+                }
+                return frames;
             }();
-            if (until > 0 && --until == 0) {
-                write_screenshot(path);
+            static unsigned taken = 0;
+            taken++;
+            for (unsigned frame : at) {
+                if (frame != taken) {
+                    continue;
+                }
+                std::string named = path;
+                if (at.size() > 1) {
+                    const size_t dot = named.find_last_of('.');
+                    const std::string stem = dot == std::string::npos ? named : named.substr(0, dot);
+                    const std::string suffix = dot == std::string::npos ? "" : named.substr(dot);
+                    named = stem + "." + std::to_string(frame) + suffix;
+                }
+                write_screenshot(named.c_str());
             }
         }
         // What the VI is scanning out, once a second, in developer mode. It is

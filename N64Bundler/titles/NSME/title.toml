@@ -237,3 +237,41 @@ name = "osSpTaskYielded"
 [[function]]
 vram = 0x803224A0
 name = "osUnmapTLBAll"
+
+# The audio microcode.
+#
+# The signal processor runs the audio list, and it is the one microcode a game
+# submits that the runtime cannot do itself: graphics tasks go to the renderer,
+# and everything else has to be translated from the cartridge like the rest of
+# the code. Without it the game is silent -- it builds its audio list every
+# frame, hands it over, and the runtime completes the task without running it.
+#
+# Nothing in the image points here. The CPU never executes a word of this, so
+# there is no call to follow, and the address reaches the task through a linker
+# symbol the same way the engine segment does. What the image does show is that
+# it is coprocessor 2 for a third of its length, which no code the R4300 runs
+# ever is, and the analyser checks the recorded offset against that.
+#
+# The address came from the game itself: the runtime prints it out of the first
+# task it cannot run, and the address it printed -- 0x8032C740 -- is built
+# exactly once in the whole cartridge, at 0x8031EA78, which is the audio driver
+# assembling its task.
+#
+# The size did not, and the size the task carries is wrong. A task says its
+# microcode is 0x800 bytes and the boot microcode ignores that and fills
+# instruction memory to the end, so the text really runs from 0x04001080 to
+# where it stops decoding -- 0xE20 bytes in, after which come zeros and then a
+# table of RDRAM pointers, which is the next thing in the cartridge rather than
+# any part of this. Two of the command handlers live past 0x800, so a
+# translation that believed the task would stop the first time the game asked
+# for either.
+#
+# The data blob is here because it is where the command table lives: sixteen
+# halfword addresses the microcode jumps through, which no instruction points
+# at and the analyser reads out.
+[[microcode]]
+name = "audio"
+rom  = 0x0E7740
+size = 0xE20
+data_rom  = 0x0F52C0
+data_size = 0x2C0

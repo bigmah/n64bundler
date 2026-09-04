@@ -224,8 +224,52 @@ enum class SaveType {
 const char *save_type_name(SaveType type);
 bool save_type_from_name(const std::string &name, SaveType &out);
 
+/// A block of RSP microcode inside the ROM.
+///
+/// The signal processor runs its own instruction set, and a game hands the
+/// task a pointer to the microcode it wants run. ultramodern intercepts the
+/// graphics task and draws it with the renderer, so the only microcode that
+/// has to be translated is whatever else the game submits -- the audio list,
+/// in practice, which is what a silent game is missing.
+///
+/// Nothing in a ROM says where its microcode is, and unlike a code segment
+/// there is no call graph to follow into one: the CPU never executes a word of
+/// it. What the image does show is that RSP code is the only code in a
+/// cartridge that uses coprocessor 2 -- the R4300 has none -- so a block of it
+/// is visible by shape even when its address is not. That is enough to check a
+/// record's numbers and not enough to find them, so they are recorded, and the
+/// host prints the line to record after the first task it could not run.
+struct MicrocodeInfo {
+    /// What to call the recompiled function. Not a claim about which microcode
+    /// this is; the name is for reading the generated code.
+    std::string name;
+    uint32_t rom = 0;
+    uint32_t size = 0;
+    /// Where the game loads it, which is how the module picks it at runtime:
+    /// the task names its microcode by address.
+    uint32_t vram = 0;
+    /// Where the text lands in the signal processor's instruction memory.
+    /// Every libultra task loads its microcode 0x80 bytes into IMEM, past the
+    /// boot microcode that put it there.
+    uint32_t text_address = 0x04001080;
+    /// The microcode's data blob, which the boot microcode copies into data
+    /// memory before the text runs. Optional, and worth recording because it
+    /// is where a microcode keeps the table it dispatches its commands
+    /// through: see harvest_branch_targets().
+    uint32_t data_rom = 0;
+    uint32_t data_size = 0;
+    /// Addresses the text jumps to through a register. The recompiler has to
+    /// know them: it turns an indirect jump into a switch over the labels it
+    /// emitted, and a target with no label is a microcode that stops.
+    std::vector<uint32_t> branch_targets;
+    /// How much of the block decodes as coprocessor 2, which is the evidence
+    /// that this is microcode at all. Reported, not acted on.
+    double cop2_density = 0.0;
+};
+
 struct Analysis {
     std::vector<SectionInfo> sections;
+    std::vector<MicrocodeInfo> microcode;
     AnalysisReport report;
     /// What the module tells the runtime to use.
     SaveType save_type = SaveType::AllowAll;
@@ -274,6 +318,8 @@ struct TitleRecord {
     /// Function boundaries the analyser got wrong, matched by vram. A size of
     /// zero deletes the boundary instead of correcting it.
     std::vector<FunctionRange> functions;
+    /// Blocks of RSP microcode, which nothing in the image points at.
+    std::vector<MicrocodeInfo> microcode;
     std::vector<std::string> notes;
 };
 

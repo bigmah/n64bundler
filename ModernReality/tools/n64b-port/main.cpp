@@ -167,6 +167,80 @@ uint64_t json_number(const std::string &text, const std::string &key, uint64_t f
     return std::strtoull(text.c_str() + at, nullptr, 10);
 }
 
+/// One block of RSP microcode, as the analyser recorded it.
+struct Microcode {
+    std::string name;
+    uint32_t rom = 0;
+    uint32_t vram = 0;
+    uint32_t size = 0;
+    uint32_t text_address = 0;
+    /// The addresses it jumps to through a register, which the recompiler
+    /// cannot always work out for itself.
+    std::vector<uint32_t> branch_targets;
+};
+
+/// Read the `microcode` array out of the info file.
+///
+/// The same argument as the rest of this file's JSON reading: the shape is
+/// fixed a few hundred lines away in n64rip's emit.cpp, and every value in it
+/// is a quoted hex number or a plain one.
+std::vector<Microcode> json_microcode(const std::string &text) {
+    std::vector<Microcode> blocks;
+    const size_t array = text.find("\"microcode\":");
+    if (array == std::string::npos) {
+        return blocks;
+    }
+    const size_t end = text.find(']', array);
+    size_t at = array;
+    while (true) {
+        const size_t open = text.find('{', at);
+        if (open == std::string::npos || open > end) {
+            break;
+        }
+        const size_t close = text.find('}', open);
+        if (close == std::string::npos) {
+            break;
+        }
+        const std::string entry = text.substr(open, close - open + 1);
+        Microcode block;
+        block.name = json_string(entry, "name");
+        auto hex_field = [&entry](const char *key) {
+            const std::string value = json_string(entry, key);
+            return value.empty() ? 0u : uint32_t(std::strtoul(value.c_str(), nullptr, 0));
+        };
+        block.rom = hex_field("rom");
+        block.vram = hex_field("vram");
+        block.size = hex_field("size");
+        block.text_address = hex_field("text_address");
+        // The branch targets are a list of quoted hex numbers, which is the
+        // only array in this file and so needs no more parsing than finding
+        // the brackets and reading what is quoted between them.
+        const size_t list = entry.find("\"branch_targets\":");
+        if (list != std::string::npos) {
+            const size_t open = entry.find('[', list);
+            const size_t close = entry.find(']', list);
+            for (size_t at = open; at != std::string::npos && at < close;) {
+                const size_t start = entry.find('"', at);
+                if (start == std::string::npos || start > close) {
+                    break;
+                }
+                const size_t end = entry.find('"', start + 1);
+                if (end == std::string::npos || end > close) {
+                    break;
+                }
+                block.branch_targets.push_back(
+                    uint32_t(std::strtoul(entry.substr(start + 1, end - start - 1).c_str(), nullptr, 0)));
+                at = end + 1;
+            }
+        }
+        if (!block.name.empty() && block.size != 0) {
+            blocks.push_back(std::move(block));
+        }
+        at = close + 1;
+    }
+    return blocks;
+}
+
 /// The save types in the descriptor, in the order the ABI numbers them.
 int save_type_value(const std::string &name) {
     if (name == "none") return 0;
@@ -490,7 +564,7 @@ std::string quote_c(const std::string &value) {
 /// The one file of the module that is not a translation of the ROM: the
 /// descriptor the host reads to find out what it has just opened.
 std::string emit_module_cpp(const std::string &info_json, const std::string &rom_hash_hex,
-                            const fs::path &rsp_source) {
+                            const std::vector<Microcode> &microcode) {
     std::ostringstream out;
     out << "// SPDX-License-Identifier: GPL-3.0-or-later\n"
         << "// Written by n64b-port. The descriptor for one recompiled game.\n"
@@ -500,19 +574,69 @@ std::string emit_module_cpp(const std::string &info_json, const std::string &rom
         << "// the recompiler's own output, included rather than copied.\n\n"
         << "#include \"modernreality/module_abi.h\"\n";
 
-    if (!rsp_source.empty()) {
-        out << "#include \"librecomp/rsp.hpp\"\n";
+    if (!microcode.empty()) {
+        out << "#include <cstdio>\n"
+            << "#include \"librecomp/rsp.hpp\"\n";
     }
     out << "\n#include \"recomp_overlays.inl\"\n\n";
 
-    if (!rsp_source.empty()) {
-        out << "// The game's audio microcode, recompiled by RSPRecomp.\n"
-            << "extern RspExitReason " << rsp_source.stem().string()
-            << "(uint8_t *rdram, uint32_t ucode_addr);\n\n"
-            << "static n64b_rsp_ucode_func select_microcode(const OSTask *task) {\n"
+    if (!microcode.empty()) {
+        out << "// The game's microcode, recompiled by RSPRecomp.\n"
+            << "//\n"
+            << "// A task names its microcode by the address the game loaded it at, so\n"
+            << "// that address is what picks between blocks. Getting it wrong is not a\n"
+            << "// risk worth taking: running the audio list through the wrong translation\n"
+            << "// would write noise into the sample buffer, and a task nothing here covers\n"
+            << "// is better reported.\n";
+        for (const Microcode &block : microcode) {
+            out << "extern RspExitReason rsp_" << block.name
+                << "(uint8_t *rdram, uint32_t ucode_addr);\n";
+        }
+        // A microcode that goes wrong must not take the game down with it.
+        //
+        // The runtime treats anything but a clean `break` as fatal, which is
+        // right for a project built around one game whose microcode is known
+        // to work. A bundler accepts cartridges nobody has run here before, and
+        // the failure it will actually meet is an indirect jump into a
+        // dispatch table entry the analysis did not find -- which costs the
+        // rest of that audio frame and nothing else. Reporting the task
+        // complete is the same trade the host already makes for a microcode it
+        // has no translation for at all.
+        out << "static RspExitReason survive(RspExitReason reason, const char *which) {\n"
+            << "    if (reason == RspExitReason::Broke) {\n"
+            << "        return reason;\n"
+            << "    }\n"
+            << "    static bool reported = false;\n"
+            << "    if (!reported) {\n"
+            << "        reported = true;\n"
+            << "        std::fprintf(stderr,\n"
+            << "                     \"note: this game's %s microcode stopped early (reason %d). \"\n"
+            << "                     \"The task is being reported complete; what it would have \"\n"
+            << "                     \"produced is lost.\\n\",\n"
+            << "                     which, int(reason));\n"
+            << "    }\n"
+            << "    return RspExitReason::Broke;\n"
+            << "}\n\n";
+        for (const Microcode &block : microcode) {
+            out << "static RspExitReason run_" << block.name
+                << "(uint8_t *rdram, uint32_t ucode_addr) {\n"
+                << "    return survive(rsp_" << block.name << "(rdram, ucode_addr), "
+                << quote_c(block.name) << ");\n"
+                << "}\n";
+        }
+        out << "\nstatic n64b_rsp_ucode_func select_microcode(const OSTask *task) {\n"
             << "    // Graphics tasks never reach here; ultramodern routes those to the\n"
             << "    // renderer. What is left is the audio list and the odd JPEG task.\n"
-            << "    return " << rsp_source.stem().string() << ";\n"
+            << "    if (task == nullptr) {\n"
+            << "        return nullptr;\n"
+            << "    }\n"
+            << "    switch (uint32_t(task->t.ucode) & 0x1FFFFFFFu) {\n";
+        for (const Microcode &block : microcode) {
+            out << "        case 0x" << std::hex << std::uppercase << (block.vram & 0x1FFFFFFFu)
+                << std::dec << std::nouppercase << "u: return run_" << block.name << ";\n";
+        }
+        out << "        default: return nullptr;\n"
+            << "    }\n"
             << "}\n\n";
     } else {
         out << "// No microcode was recompiled for this game, so the host reports the\n"
@@ -672,21 +796,66 @@ int build(Options options) {
     }
 
     event("step", "2 3 Writing the module descriptor");
-    // RSPRecomp output, when there is any, is a sibling of the C the
-    // recompiler wrote. Nothing produces one yet; the shape is here so that
-    // adding microcode identification is a change to the analyser alone.
-    fs::path rsp_source;
-    for (const fs::directory_entry &entry : fs::directory_iterator(generated)) {
-        if (entry.path().extension() == ".cpp" && entry.path().stem().string().rfind("rsp_", 0) == 0) {
-            rsp_source = entry.path();
-            break;
+
+    // The signal processor's own code, translated the same way the CPU's was.
+    //
+    // ultramodern draws a graphics task itself, so what is left is whatever
+    // else the game submits -- the audio list, which is the difference between
+    // a game that plays and a game that mimes. Nothing in a ROM says where the
+    // microcode is, so the analyser gets it from the title record; a game
+    // without one recompiles exactly as before and is silent.
+    std::vector<Microcode> microcode = json_microcode(info_json);
+    for (auto block = microcode.begin(); block != microcode.end();) {
+        const fs::path config = generated / ("rsp_" + block->name + ".toml");
+        const fs::path source = generated / ("rsp_" + block->name + ".cpp");
+        std::ostringstream toml;
+        toml << "# Written by n64b-port. One block of RSP microcode out of the cartridge.\n"
+             // RSPRecomp resolves paths against the configuration's own
+             // directory, so both of these have to be absolute.
+             << "rom_file_path = \"" << fs::absolute(options.rom).string() << "\"\n"
+             << "text_offset = 0x" << std::hex << std::uppercase << block->rom << "\n"
+             << "text_size = 0x" << block->size << "\n"
+             << "text_address = 0x" << block->text_address << std::dec << std::nouppercase << "\n"
+             << "output_file_path = \"" << fs::absolute(source).string() << "\"\n"
+             << "output_function_name = \"rsp_" << block->name << "\"\n";
+        if (!block->branch_targets.empty()) {
+            // Where the microcode dispatches its command list. The recompiler
+            // turns an indirect jump into a switch over the labels it emitted,
+            // and a target it has no label for is a microcode that stops.
+            toml << "extra_indirect_branch_targets = [";
+            for (size_t i = 0; i < block->branch_targets.size(); i++) {
+                toml << (i == 0 ? "" : ", ") << "0x" << std::hex << std::uppercase
+                     << block->branch_targets[i] << std::dec << std::nouppercase;
+            }
+            toml << "]\n";
         }
+        if (!write_file(config, toml.str())) {
+            fail("could not write the microcode configuration");
+            return 1;
+        }
+        if (run({options.rsp_recomp.string(), config.string()}) != 0 || !fs::exists(source)) {
+            // A microcode that will not translate is a silent game, not a
+            // broken one, so say so and carry on rather than failing a build
+            // that would otherwise have worked.
+            info("microcode_failed=" + block->name);
+            fs::remove(source, ec);
+            block = microcode.erase(block);
+            continue;
+        }
+        {
+            char described[64];
+            std::snprintf(described, sizeof(described), "microcode=%s vram=0x%08X bytes=0x%X",
+                          block->name.c_str(), block->vram, block->size);
+            info(described);
+        }
+        ++block;
     }
+
     if (options.trace && !write_file(generated / "trace.h", kTraceHeader)) {
         fail("could not write the trace header");
         return 1;
     }
-    if (!write_file(generated / "module.cpp", emit_module_cpp(info_json, rom_hash, rsp_source))) {
+    if (!write_file(generated / "module.cpp", emit_module_cpp(info_json, rom_hash, microcode))) {
         fail("could not write the module descriptor");
         return 1;
     }

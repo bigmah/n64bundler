@@ -209,6 +209,43 @@ bool load_title_record(const std::string &path, TitleRecord &out, std::string &e
         }
     }
 
+    // RSP microcode. A rom offset and a size; the address the game loads it at
+    // follows from IPL3's copy unless the record says otherwise, and the text
+    // address is the same 0x04001080 in every libultra task.
+    if (const toml::array *blocks = table["microcode"].as_array()) {
+        for (const toml::node &node : *blocks) {
+            const toml::table *block = node.as_table();
+            if (block == nullptr) {
+                continue;
+            }
+            MicrocodeInfo info;
+            info.name = (*block)["name"].value_or(std::string{});
+            const bool have_rom = read_address((*block)["rom"].node(), info.rom);
+            const bool have_size = read_address((*block)["size"].node(), info.size);
+            if (!have_rom || !have_size) {
+                error = path + ": every [[microcode]] needs a rom and a size";
+                return false;
+            }
+            if (info.name.empty()) {
+                error = path + ": every [[microcode]] needs a name";
+                return false;
+            }
+            if (!read_address((*block)["vram"].node(), info.vram)) {
+                info.vram = 0;
+            }
+            uint32_t text_address = 0;
+            if (read_address((*block)["text_address"].node(), text_address)) {
+                info.text_address = text_address;
+            }
+            if (!read_address((*block)["data_rom"].node(), info.data_rom) ||
+                !read_address((*block)["data_size"].node(), info.data_size)) {
+                info.data_rom = 0;
+                info.data_size = 0;
+            }
+            out.microcode.push_back(std::move(info));
+        }
+    }
+
     return true;
 }
 

@@ -612,14 +612,27 @@ bool branches_escape(const Rom &rom, const SectionInfo &section,
         if (target >= function.vram && target < end) {
             continue;
         }
-        if (starts.count(target) != 0 && target >= section.vram && target < text_end) {
+        if (target < section.vram || target >= text_end) {
+            // Out of this section. For a conditional branch that is nonsense
+            // and the function cannot be translated; for a jump it is an
+            // ordinary tail call into another segment, which the recompiler
+            // resolves against every section at once -- something this
+            // function, looking at one section, cannot see. Leaving it alone
+            // and letting the recompiler refuse it if it must is what keeps a
+            // game with two segments from losing every function that tail
+            // calls across them: Mario Builder 64 lost 113 that way.
+            if ((word >> 26) == 0x02) {
+                continue;
+            }
+            return true;
+        }
+        if (starts.count(target) != 0) {
             continue; // a tail call, which the recompiler handles
         }
-        // Anything else is a branch this function cannot be translated with:
-        // out of the section entirely, into data past the end of .text, or
-        // into the middle of another function. A `jal` in the same position
-        // could fall back to the runtime's function lookup; a branch has no
-        // such escape, and the recompiler stops on it.
+        // A branch into the middle of another function in this section. The
+        // two are really one and the recompiler cannot express that. A `jal`
+        // in the same position could fall back to the runtime's function
+        // lookup; a branch has no such escape.
         return true;
     }
     return false;

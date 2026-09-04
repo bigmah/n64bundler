@@ -1,0 +1,79 @@
+diff --git a/include/recompiler/context.h b/include/recompiler/context.h
+index e7b4431..d34d32e 100644
+--- a/include/recompiler/context.h
++++ b/include/recompiler/context.h
+@@ -235,6 +235,12 @@ namespace N64Recomp {
+         bool skip_validating_reference_symbols = true;
+         // Whether all function calls (excluding reference symbols) should go through lookup.
+         bool use_lookup_for_all_function_calls = false;
++        // Whether a jal to an address no section covers should fall back to runtime lookup
++        // instead of failing the build. Recompiling from an elf, an unresolvable call means
++        // the symbol data is wrong and stopping is right. Recompiling from a bare ROM, it
++        // means the call goes somewhere the analysis did not recover -- an overlay, in
++        // practice -- and lookup is the same mechanism an indirect call to it would use.
++        bool lookup_unresolved_function_calls = false;
+ 
+         //// Only used by the CLI, TODO move this to a struct in the internal headers.
+         // A mapping of function name to index in the functions vector
+diff --git a/src/config.cpp b/src/config.cpp
+index 1066aff..0c1f8fc 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -465,6 +465,13 @@ N64Recomp::Config::Config(const char* path) {
+         }
+ 
+         // Use trace mode if enabled (optional)
++        // A jal to an address no section covers is a hard error when the symbols
++        // came from an elf, because it means they are wrong. When they were recovered
++        // from a bare ROM it just means the call leaves the code that was recovered,
++        // so route it through the runtime's function lookup instead of stopping.
++        std::optional<bool> lookup_unresolved_opt = input_data["lookup_unresolved_function_calls"].value<bool>();
++        lookup_unresolved_function_calls = lookup_unresolved_opt.value_or(false);
++
+         std::optional<bool> trace_mode_opt = input_data["trace_mode"].value<bool>();
+         if (trace_mode_opt.has_value()) {
+             trace_mode = trace_mode_opt.value();
+diff --git a/src/config.h b/src/config.h
+index 7d6db23..0ec2e7a 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -45,6 +45,7 @@ namespace N64Recomp {
+         bool unpaired_lo16_warnings;
+         bool use_mdebug;
+         bool trace_mode;
++        bool lookup_unresolved_function_calls;
+         bool allow_exports;
+         bool strict_patch_mode;
+         std::filesystem::path elf_path;
+diff --git a/src/main.cpp b/src/main.cpp
+index f79580f..1698bd1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -526,6 +526,7 @@ int main(int argc, char** argv) {
+ 
+     // Propogate the trace mode parameter.
+     context.trace_mode = config.trace_mode;
++    context.lookup_unresolved_function_calls = config.lookup_unresolved_function_calls;
+ 
+     // Apply any single-instruction patches.
+     for (const N64Recomp::InstructionPatch& patch : config.instruction_patches) {
+diff --git a/src/recompilation.cpp b/src/recompilation.cpp
+index c228433..5625641 100644
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -305,6 +305,15 @@ bool process_instruction(GeneratorType& generator, const N64Recomp::Context& con
+ 
+                 switch (jal_result) {
+                     case JalResolutionResult::NoMatch:
++                        // Nothing we know about lives at this address. Recompiling from an
++                        // elf that is a hard error, but recompiling from a bare ROM it is
++                        // the expected shape of a call into an overlay the analysis did not
++                        // recover, and the runtime can still resolve it the way it resolves
++                        // any other call to code loaded later.
++                        if (context.lookup_unresolved_function_calls) {
++                            call_by_lookup = true;
++                            break;
++                        }
+                         fmt::print(stderr, "No function found for jal target: 0x{:08X}\n", target_func_vram);
+                         return false;
+                     case JalResolutionResult::Match:

@@ -1,0 +1,6 @@
+[submodule "ModernReality/vendor/N64ModernRuntime"]
+	path = ModernReality/vendor/N64ModernRuntime
+	url = https://github.com/N64Recomp/N64ModernRuntime.git
+[submodule "ModernReality/vendor/rt64"]
+	path = ModernReality/vendor/rt64
+	url = https://github.com/rt64/rt64.git

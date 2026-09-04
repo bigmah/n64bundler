@@ -163,6 +163,11 @@ fi
 process_one() {
   local rom="$1"
   [ -f "$rom" ] || die "no such file: $rom"
+  # The library entry and the .app launcher hold this path and are read later,
+  # from a working directory nobody controls -- a Finder launch starts in "/".
+  # A ROM named on the command line as "sm64.z64" has to be written down as
+  # where it actually is.
+  rom="$(cd "$(dirname "$rom")" && pwd)/$(basename "$rom")"
   info rom "$rom"
 
   printf '%s%s%s\n' "$bold" "RecompN64 - $(basename "$rom")" "$off"

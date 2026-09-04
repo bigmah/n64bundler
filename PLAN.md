@@ -64,17 +64,19 @@ say where those live. `n64rip` looks for the DMA tables libultra games
 conventionally build (runs of `{romStart, romEnd, vramStart, vramEnd}` words),
 which finds them in a good share of titles and misses them in the rest.
 
-So the honest statement, and the one the README makes: **a game that boots is
-not a game that finishes, and some ROMs will not boot at all.** The design
-answer is the same one DolBundler uses for tuning — a per-title record checked
-into the repo. Super Mario 64 is the case that proves both halves: the analyser
+So the honest statement, and the one the README makes: **a game that plays is
+not every game, and some ROMs will not boot at all.** The design answer is the
+same one DolBundler uses for tuning — a per-title record checked into the
+repo. Super Mario 64 is the case that proves both halves: the analyser
 finds neither of its two extra code segments on its own, and with them written
 down every call in the image is placed.
 
 ```
 N64Bundler/titles/NSME/title.toml     sections n64rip could not find on its own,
-                                      the save type, the audio microcode, and
-                                      any function the analyser got wrong
+                                      the libultra functions no signature named,
+                                      where the audio microcode is, the save
+                                      type, and any boundary the analyser got
+                                      wrong
 ```
 
 An unknown ROM gets pure analysis. A ROM with a record gets analysis plus the
@@ -97,7 +99,7 @@ game.z64
   │                        → <ID>.symbols.toml, <ID>.recomp.toml, <ID>.info.json
   │
   │  3. Recompile       N64Recomp  symbols.toml + rom → C
-  │                     RSPRecomp  audio ucode      → C   (not wired up yet)
+  │                     RSPRecomp  each [[microcode]] → C
   │
   │  4. Compile         clang: C → arm64 <ID>.dylib, one module per game
   │                     exporting the n64b_module_v1 descriptor
@@ -191,25 +193,145 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
 | a second title | done — Mario Builder 64 recompiles too, at 100% coverage |
 | **a game that draws a frame** | done — Mario Builder 64 draws its startup screen; see below |
+| the TLB | done — `osMapTLB` and its family, aliased with `mach_vm_remap` |
+| audio microcode | done — `RSPRecomp` wired in, one `[[microcode]]` line per block |
+| scripted input, audio levels | done — `N64B_INPUT`, `N64B_LEVELS`; see below |
+| **a game that plays** | done — Super Mario 64, with sound, input and saves |
 
 ### Where Super Mario 64 stands
 
 ```
-5,034 functions recovered: 31 by following calls, 5,003 by sweeping
+5,034 functions recovered: 387 by following calls, 4,654 by sweeping
 14,601 of 14,601 internal calls land on a function boundary (100.00%)
 0 calls point outside every section found
-35 functions named from libultra signatures
-31 functions stubbed: they drive hardware and no signature named them
+39 functions named from libultra signatures, plus 16 named in the title record
+9 functions stubbed: they drive hardware and nothing named them
+1 block of RSP microcode, 42% coprocessor 2
 ```
 
-Every call in the image now lands on a function this analysis recovered, and
-none of them leaves the code it recompiled. That took the title record: Super
-Mario 64 loads two further code segments — the engine, which is most of the
-game's logic, and libgoddard, the Mario head on the file select screen — and it
+Every call in the image lands on a function this analysis recovered, and none
+of them leaves the code it recompiled. That took the title record: Super Mario
+64 loads two further code segments — the engine, which is most of the game's
+logic, and libgoddard, the Mario head on the file select screen — and it
 addresses both through linker symbols rather than through a DMA table, so
 nothing in the image points at them. Written down once, they are found every
 time. Without the record the same ROM recovers 3,890 functions and 1,207 calls
 leave the code.
+
+**And it plays.** The title screen, the file select, Peach's letter, the castle
+grounds, Mario under the control of a pad, the music and the sound effects, and
+a save file that survives quitting.
+
+### What took Super Mario 64 from a black window to a game
+
+Four things, and each was invisible until the one in front of it was gone.
+
+**It stopped inside the serial interface.** The game loop thread reached
+`init_controllers`, called `osContInit`, and blocked on the message an SI
+interrupt would have posted. There is no SI and there is no interrupt, so that
+is where it stayed — and that, rather than anything about the analysis, was the
+black window.
+
+The signature database is built from a much later SDK than this cartridge was
+linked against, so it names what did not change between them — threads, message
+queues, caches, the task interface — and none of the device drivers. Sixteen of
+those are named in the record now, each read out of the disassembly rather than
+guessed, with the evidence beside it. They were found by listing every call the
+game's own code makes into the libultra range and asking what each one does with
+the hardware: which registers it touches, what constants it builds, what shape
+its arguments have. `osContInit` sets a one-shot flag and waits until the
+counter passes 500,000, which is the half-second libultra gives the controllers
+after a cold boot. `osEepromLongRead` rejects an address of 64 or more, which is
+the 4kbit chip's block count, and loops over the single-block call.
+`osAiSetFrequency` writes the DAC rate register. None of that is ambiguous.
+
+A side effect worth having: with the EEPROM calls named, the analyser's save
+type detection now has evidence to work from. It says `eep4k` because the
+EEPROM routines are linked in, where before it said "no libultra save routine
+was named".
+
+**Then it drew three frames and stopped.** The audio session initialiser waits
+for the sound thread by setting a counter to zero and reading it in a loop. The
+recompiler already knew this shape from Mario Builder 64 — a loop the runtime
+can never break, because it only gets to schedule when the game calls into it —
+but only for a loop of loads and nops. This one compares as it goes, and a
+`slt` is neither.
+
+The rule is about what the loop *carries* now rather than what it contains.
+Walk one iteration: if every register it reads before defining is one that only
+a load writes, then nothing survives from iteration to iteration except what
+came out of memory, so the loop cannot end on its own. `while (p != end) p++`
+reads the pointer it increments and is rejected by the same test. Loads and
+register arithmetic are allowed inside; a store, a call, a second branch or a
+coprocessor access is not.
+
+**Then it died in libgoddard.** The Mario head reads its display data through
+the TLB: the loader DMAs it into the main pool and maps it in 64KB pages at
+0x04000000. librecomp holds the console's memory as one flat array indexed by
+`address - 0x80000000`, which sends a mapped address into the four gigabytes it
+reserves and never maps.
+
+A TLB entry is an alias — two addresses, one page — and `mach_vm_remap` makes
+exactly that. So the runtime keeps the entries as the console keeps them and
+rebuilds the aliases whenever they change, one *host* page at a time: this
+machine's pages are 16KB and the console's can be 4KB, so the unit has to be
+the larger one. A host page is aliased when every console page inside it agrees
+on a distance from its physical address, which is what mapping a buffer looks
+like. Console pages the game did not map are allowed inside one and end up
+pointing at whatever physical memory follows; on the console they would fault,
+and a game that stays inside the mapping it asked for cannot tell the
+difference. Mario Builder 64 maps a single 4KB page, and that compromise is
+what makes it work at all.
+
+**And it was silent.** ultramodern draws a graphics task itself, so the only
+microcode that has to be translated is whatever else a game submits — the audio
+list. `RSPRecomp` was built and the module ABI had a slot for the result;
+nothing filled it, so every audio task was reported complete without running.
+
+Where the microcode is cannot be recovered. The CPU never executes a word of
+it, so there is no call to follow, and the address reaches the task through a
+linker symbol the way the engine segment does. It is a `[[microcode]]` line in
+the record, and three things about it had to be right:
+
+- **The size the task carries is wrong.** Super Mario 64 sets `ucode_size` to
+  0x800 and the boot microcode ignores it, filling instruction memory to the
+  end. Two of the sixteen command handlers live past 0x800.
+- **The recompiler could not find the command handlers.** A microcode
+  dispatches through a table of halfword addresses in its data blob, and the
+  blob is data — nothing in the instruction stream points into it. The analyser
+  reads it out: a halfword counts as a branch target when it is inside the text
+  and four-byte aligned, which is four bytes out of the sixty-four thousand a
+  halfword could hold. That finds all sixteen entries of the table and rejects
+  the sixteen bit masks beside them without having to know they are masks.
+- **A microcode that goes wrong must not take the game down.** The module wraps
+  each block so one that stops early reports its task complete and says so
+  once. Taking the process down over sound is the wrong trade for a bundler,
+  and the host already made that trade for a task it cannot run at all.
+
+A recorded offset is checked by shape before it is trusted. The R4300 has no
+coprocessor 2, so nothing the CPU runs contains one; Super Mario 64's audio
+microcode reads 42% coprocessor 2 where data reads near zero.
+
+### A pad a script can hold, and a level meter
+
+The same argument the screenshot is here for, twice over. A game past its title
+screen cannot be reached by waiting — something has to press Start — and
+whether a game is making a sound is a thing you find out by listening, which a
+script cannot do.
+
+```
+N64B_INPUT="300:start,308:,430:a,438:,2170:up"   holds port one
+N64B_LEVELS=1                                     the loudest sample each second
+N64B_SCREENSHOT_AFTER="900,3300,5400"             several frames, not one
+```
+
+Frames are counted in reads of controller one, which is once per game frame in
+anything that polls the way libultra intends. That is how everything above
+was checked: Start to leave the title, A to pick a file, A twice to dismiss Lakitu,
+and the stick to walk Mario up to the castle bridge, with the frame at each
+step written out as a PPM. And the levels are how "it plays its music" became a
+measurement — peaks between a third and nine tenths of full scale at 32kHz,
+with silence in the transitions and nowhere else.
 
 The second title is Mario Builder 64, a Super Mario 64 romhack, and it is
 where every boundary rule here was actually tested — Super Mario 64 was already
@@ -226,32 +348,21 @@ inside a function was a place the recompiler would have invented a `static_`
 function of its own — which cannot be named, cannot be stubbed, and arrives too
 late for any check here to have looked at it.
 
-**It gets much further than Super Mario 64, because it links against exactly
-the libultra this machine has a signature database for.** 51 functions are
-named, in one contiguous run from `0x80130960` to `0x80136CC0` — which is what
-a correctly identified static library looks like — and they are the whole
-public API: `osPiStartDma`, `osCreateViManager`, `osViSetMode`,
-`osViSwapBuffer`, `osSpTaskStartGo`, `osCreateThread`, `osRecvMesg`. So it
-boots, brings up its threads, relocates its main segment, runs its game loop,
-and **submits display lists that RT64 recognises the microcode of and
-processes.** It configures the video interface too: 320 pixels wide, a real
-mode, a real origin.
+**It needs no record for its libultra, because it links against exactly the
+libultra this machine has a signature database for.** 57 functions are named,
+in one contiguous run from `0x80130960` to `0x80136CC0` — which is what a
+correctly identified static library looks like — and they are the whole public
+API: `osPiStartDma`, `osCreateViManager`, `osViSetMode`, `osViSwapBuffer`,
+`osSpTaskStartGo`, `osCreateThread`, `osRecvMesg`. That is the difference
+between the two cartridges in one line: Super Mario 64 needed sixteen device
+drivers identified by hand, and this one needed none. It was the first to draw
+for exactly that reason, before any of the work above existed.
 
-The window is still black, and the reason is now one value. The game hands
-`osViSwapBuffer` a null framebuffer, every frame, forever:
-
-```
-vi: origin 0x00000280 width 320, game framebuffer 0x00000000
-```
-
-An origin of 0x280 is the VI's own field offset added to nothing. The pointer
-is findable and was found: the only code that reads it is at `0x80183618`,
-which loads it from `0x80266A54` and hands it straight to `osViSwapBuffer`.
-Nothing in any recovered section ever writes that address. So the code that
-should fill it in is code the game never reaches, and the question is no longer
-"where is the framebuffer" but "what did the game skip". Answering that needs a
-memory watchpoint, or a second title record entry nobody can guess at, rather
-than more static analysis.
+It was black for a while, and the reason came down to one value: the game
+handed `osViSwapBuffer` a null framebuffer, every frame, forever, because it
+never reached the code that fills the pointer in. What it had not reached was
+its own behaviour interpreter, and the four faults below are what was in the
+way.
 
 Getting it that far took a title record and three things in the host:
 
@@ -401,25 +512,36 @@ measurement and data rather than design.
 5. ~~**The window**~~ — done. Library, live console, per-game settings, Create
    App.
 6. ~~**Per-title records**~~ — done, and Super Mario 64 has one.
+7. ~~**Audio microcode**~~ — done. `RSPRecomp` runs over each `[[microcode]]`
+   block in the record and the module picks between them by the address the
+   task names.
+8. ~~**The TLB**~~ — done. `osMapTLB` and its family, aliased with
+   `mach_vm_remap` a host page at a time.
 
 What is actually next:
 
 1. **A wider signature database.** Several libultra revisions rather than one.
-   This is the whole difference between a game that boots and a game that does
-   not, and it needs archives rather than code.
-2. **Audio microcode.** `RSPRecomp` is built and the module ABI carries a slot
-   for the result; nothing identifies which microcode a ROM uses yet, so
-   `get_rsp_microcode` returns nullptr and an audio task is reported rather
-   than run.
-3. **More titles.** Two is not a sample either. Everything the analyser knows
-   how to do it learned from Super Mario 64 and Mario Builder 64, and the next
-   ROM will teach it something else.
+   This is the difference between a game that plays out of the box and a game
+   whose sixteen device drivers have to be identified by hand first, and it
+   needs archives rather than code.
+2. **Finding the microcode without being told.** A ROM's RSP code is visible by
+   shape — the R4300 has no coprocessor 2, so a block dense with it is
+   microcode and nothing else is — and the address is one the game's own code
+   builds. On Super Mario 64 those two rules together leave three candidates,
+   one of which is the audio microcode; on Mario Builder 64 they leave
+   forty-one, so the rule is not ready. What separates them is probably the
+   text's extent, which is also the number the record has to carry today.
+3. **More titles.** Two is not a sample. Everything the analyser knows how to
+   do it learned from Super Mario 64 and Mario Builder 64, and the next ROM
+   will teach it something else.
 
 ## Not in scope yet
 
 - **iPhone.** DolBundler's phone path exists because iOS refuses to map an
   unsigned executable page, so every game is linked into the app before it is
-  signed. The same is true here and the same solution would work, but it is
-  worth nothing until a game runs on the Mac.
+  signed. The same is true here and the same solution would work. The reason it
+  was out of scope — that no game ran on the Mac yet — has gone, but the TLB
+  now uses `mach_vm_remap`, which is a thing to check before assuming the port
+  is only signing.
 - **Mods.** librecomp has a whole mod system and N64Recomp has a live
   recompiler behind it. Out of scope until the static path is solid.

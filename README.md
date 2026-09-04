@@ -14,13 +14,14 @@ and deliberately the same shape: a window over a headless pipeline, a library
 of games, per-game `.app` bundles that hold no game data, and a runtime tree
 that carries the forks.
 
-**This is under construction. One game draws.** Mario Builder 64 recompiles,
-boots, and renders its startup screen from its own display lists; Super Mario
-64 recompiles completely and stops inside its own libultra, for a reason that
-is a missing signature database rather than a missing idea. Everything around
-both works: a ROM is analysed, recompiled, compiled, added to the library and
+**One game plays.** Super Mario 64 recompiles from a bare cartridge dump and
+runs: its title screen, its file select, Peach's letter, the castle grounds,
+Mario under the control of a pad, its music and its sound effects, and a save
+file that survives quitting. Mario Builder 64, the second cartridge, recompiles
+at the same coverage and reaches its startup screen. Everything around both
+works: a ROM is analysed, recompiled, compiled, added to the library and
 launched into a window with the renderer up. [PLAN.md](PLAN.md) has the design,
-the measured numbers, and what each of the two is waiting on.
+the measured numbers, and what is still missing.
 
 ## Quick start
 
@@ -99,41 +100,55 @@ recompiled.**
 
 Drop the ROM on the window and it lands in the library with a cover and a Play
 button; press Play and a window titled Super Mario 64 opens with RT64 on Metal
-behind it and the game's entry point running on its own thread.
+behind it, and the game plays.
 
-**And then the screen stays black.** 31 functions are stubbed because they
-drive the console's registers and no signature named them, and nine of those
-are the PI — the cartridge DMA. Super Mario 64 loads everything through it, so
-nothing loads. The runtime implements every one of those functions; the only
-missing thing is a signature database wide enough to say which is which.
-[PLAN.md](PLAN.md) has the detail, including why one `libultra.a` is not
-enough.
+**What it took, past the analysis, was libultra's device drivers.** The
+signature database here is built from a much later SDK than this cartridge was
+linked against, so it names the parts of libultra that did not change between
+them — threads, message queues, caches — and none of the drivers. Left
+unnamed, they run as recompiled MIPS writing to hardware that is not there, and
+the game stops the first time it waits for one: `osContInit` blocks on the
+message an interrupt from the serial interface would have posted, and the
+interrupt never comes.
 
-A second ROM goes much further. Mario Builder 64, a Super Mario 64 romhack,
-links against exactly the libultra a signature database could be built from
-here, so its whole libultra API is named and substituted. It boots, brings up
-its threads, relocates its main segment, runs its game loop, and submits
-display lists that RT64 recognises the microcode of and draws. It reaches its
-startup screen — the game's own font, saying that SD card emulation is not
-detected — and waits there for a button.
+Sixteen of them are named in the title record now, each identified from the
+disassembly and each with the evidence written beside it: the four controller
+and four EEPROM calls that reach the PIF, the three audio interface calls, the
+PI manager, and `__osSiRawStartDma` under all of them. They were found by
+taking every call from the game's own code into libultra and reading what each
+one does with the hardware, rather than by matching bytes.
 
-Getting it there took the record naming three things nothing points at (the
-segment it relocates its code to, the segment of extra code it loads to the top
-of RAM, and the handlers of the two interpreters it reaches only through
-tables), and two fixes with nothing to do with this cartridge: the runtime was
-registering every section twice, once at an address guessed from the entrypoint
-and once where the analysis put it, so every indirect call resolved to the
-wrong function; and the recompiler now yields out of a loop that only reads
-memory, because a console model where the runtime schedules only when the game
-calls into it cannot break a busy-wait the way an interrupt does.
+Two things after that were not about this cartridge at all. **A loop that only
+reads memory cannot end on its own here**, because the runtime schedules only
+when the game calls into it, so the recompiler yields out of one — and Super
+Mario 64's audio initialiser spins on a counter with a comparison in the loop,
+which the old rule did not recognise. **And libgoddard reads its data through
+the TLB**: the Mario head DMAs its display data into the main pool and maps it
+at 0x04000000, and librecomp holds the console's memory as one flat array with
+nothing mapped there. A TLB entry is an alias — two addresses, one page — so
+the runtime makes one.
+
+Sound needed the last piece. The signal processor runs its own instruction set
+and the audio list is the one microcode ultramodern does not handle itself, so
+it has to be translated out of the cartridge like the rest of the code.
+`RSPRecomp` does that; what was missing was knowing where it is, which nothing
+in the image says, so it is a `[[microcode]]` line in the title record.
+
+A second ROM, Mario Builder 64, is a Super Mario 64 romhack that links against
+exactly the libultra a signature database could be built from here, so its
+whole libultra API is named without a record. It boots, brings up its threads,
+relocates its main segment, runs its game loop, and reaches its startup screen
+— the game's own font, saying that SD card emulation is not detected.
 
 Two titles is enough to see the shape of the problem: with the right libultra a
 ROM gets into its own code and what is left is finding its segments; without
-it, a ROM stops inside libultra and finding segments does not help.
+one, every device driver has to be identified by hand and written down. Super
+Mario 64's record is what that costs — twenty-six lines of addresses, and the
+game plays.
 
-**So: a game that boots is not a game that finishes, and some ROMs will not
-boot at all.** That is the honest state of it, and it has not changed — only
-got more specific.
+**So: a game that plays is not every game, and some ROMs will not boot at all.**
+Everything the analyser knows it learned from two cartridges, and the next one
+will teach it something else.
 
 ## Legal
 
@@ -153,7 +168,10 @@ N64_LIBULTRA="/path/to/decomp/lib/n64/libultra*.a" ./N64Bundler/build.sh
 ```
 
 Without it a ROM still recompiles — it just does so with libultra's own
-hardware routines translated rather than replaced, which does not get far.
+hardware routines translated rather than replaced, which stops at the first
+thing the game waits for. That is a gap a title record can close, and Super
+Mario 64's does; it is sixteen lines of addresses, and each of them is a
+function a wider database would have named for free.
 
 ## License
 

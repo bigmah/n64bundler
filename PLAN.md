@@ -300,6 +300,18 @@ title record can name a function outright — that is what the `[[function]]`
 entries are for, and the addresses to fill in are the `stubbed` list `n64rip`
 writes into `<ID>.info.json`.
 
+One shortcut that looks promising and is not: the stubbed functions can be
+identified from the registers they write, and for Super Mario 64 they fall out
+cleanly — `0x803284B0` writes `PI_DRAM_ADDR`, `PI_CART_ADDR` and `PI_WR_LEN`,
+so it is `osPiRawStartDma`; `0x80325DB0` writes the AI's address and length, so
+it is `osAiSetNextBuffer`; `0x8032AE10` writes `MI_INTR_MASK`, so it is
+`osSetIntMask`. Naming them buys nothing. librecomp's `osPiRawStartDma` is
+itself a stub that puts up a message box saying the function that called it was
+not properly named, and its `osSetIntMask` is empty — which is what stubbing
+already does. The runtime substitutes at the level of the public API, and the
+public API is exactly the part that touches no registers and so cannot be
+fingerprinted this way.
+
 Until then, a function that drives hardware and has no name is stubbed rather
 than translated. That is a deliberate choice and it is the difference between a
 game that does nothing and a process that dies: libultra's own code writes to

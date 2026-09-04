@@ -22,8 +22,12 @@ notes = [
 name = "main"
 rom  = 0x026020
 vram = 0x8014CA20
-size = 0x87000
+size = 0xF8000
 
+# Functions nothing calls directly, found by running the game with
+# `n64b-port --trace` and reading the address the runtime could not resolve out
+# of the last few hundred entries the host printed. Each one moved the game a
+# little further into its own code; the fifth got it to its render loop.
 [[function]]
 vram = 0x80124FC0
 

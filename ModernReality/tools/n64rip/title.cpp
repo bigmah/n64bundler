@@ -181,6 +181,7 @@ bool load_title_record(const std::string &path, TitleRecord &out, std::string &e
                     info.functions.push_back(std::move(range));
                 }
             }
+            info.from_record = true;
             out.sections.push_back(std::move(info));
         }
     }

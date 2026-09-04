@@ -780,6 +780,7 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
     }
 
     sweep(rom, section, recovered, report);
+
     if (signatures != nullptr) {
         name_from_signatures(rom, section, *signatures, provides, recovered, report);
     }

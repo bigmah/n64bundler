@@ -129,6 +129,14 @@ struct SectionInfo {
     /// Where the recovered code ends inside this section. Everything past it
     /// is rodata and data, which the recompiler has no use for.
     uint32_t text_size = 0;
+    /// Whether a title record supplied this section rather than the analysis
+    /// finding it. It changes one thing: a call from proven code to somewhere
+    /// past the end of the sweep is followed, because the record has asserted
+    /// that the whole range is one segment and a `jal` across a block of
+    /// rodata inside it is still a call. Without a record saying so there is
+    /// nothing to distinguish that from a call off the end of the section.
+    bool from_record = false;
+
     std::vector<FunctionRange> functions;
 };
 

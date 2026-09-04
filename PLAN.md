@@ -244,9 +244,14 @@ The window is still black, and the reason is now one value. The game hands
 vi: origin 0x00000280 width 320, game framebuffer 0x00000000
 ```
 
-An origin of 0x280 is the VI's own field offset added to nothing. Somewhere in
-the game's own state a framebuffer pointer was never filled in, and finding
-which one needs a memory watchpoint rather than more static analysis.
+An origin of 0x280 is the VI's own field offset added to nothing. The pointer
+is findable and was found: the only code that reads it is at `0x80183618`,
+which loads it from `0x80266A54` and hands it straight to `osViSwapBuffer`.
+Nothing in any recovered section ever writes that address. So the code that
+should fill it in is code the game never reaches, and the question is no longer
+"where is the framebuffer" but "what did the game skip". Answering that needs a
+memory watchpoint, or a second title record entry nobody can guess at, rather
+than more static analysis.
 
 Getting it that far took a title record and three things in the host:
 

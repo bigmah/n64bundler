@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Super Mario 64 (USA) - what n64rip cannot recover from the image on its own.
+#
+# Measurements of a cartridge: two ROM offsets, two load addresses, two sizes
+# and a hash. No game data, the same rule the ROMs themselves follow.
+#
+# Super Mario 64 loads two code segments beyond the megabyte IPL3 copies, and
+# it addresses both through linker symbols rather than through a DMA table --
+# `load_engine_code_segment()` is a call with `_engineSegmentRomStart` in a
+# register, and there is nothing in the image that says what that was. So the
+# analyser finds neither, and without them 1,207 of the game's calls leave
+# every section it recovered.
+#
+# How the numbers were found, so they can be checked: collect every `jal`
+# target in the boot segment that lands outside it, then search the ROM for the
+# offset at which those targets fall on function prologues. Both segments have
+# exactly one such offset.
+
+[title]
+game_id = "NSME"
+name = "Super Mario 64"
+rom_hash = "8a90daa33e09a265"
+# The cartridge has a 4kbit EEPROM. Without this the analyser says allow_all,
+# which works but reports the larger 16kbit chip to the game.
+save_type = "eep4k"
+notes = [
+    "the engine and goddard segments are addressed through linker symbols, so nothing in the image points at them",
+]
+
+# The engine: math_util, surface_collision, behavior_script, graph_node, and
+# the rest of what every level calls into. Copied to the top of the main pool
+# at boot. This is where nearly all of the missing calls go.
+[[section]]
+name = "engine"
+rom  = 0x0F5580
+vram = 0x80378800
+size = 0x13200
+
+# libgoddard, the Mario head on the file select screen. Its own little 3D
+# engine, and the only part of the game that uses it.
+[[section]]
+name = "goddard"
+rom  = 0x21F4C0
+vram = 0x8016F000
+size = 0x60000

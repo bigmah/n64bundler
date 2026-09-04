@@ -430,6 +430,7 @@ void name_from_signatures(const Rom &rom, const SectionInfo &section,
                 best = candidate;
             }
         }
+
         if (best == nullptr) {
             continue;
         }
@@ -625,19 +626,123 @@ bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange 
     for (uint32_t offset = 0; offset < function.size; offset += 4) {
         const uint32_t vram = function.vram + offset;
         const uint32_t word = rom.word(section.rom + (vram - section.vram));
+
+        // A `lui` of an address inside the RCP's register block.
+        //
+        // Those registers are how libultra drives the hardware: the VI's
+        // current framebuffer, the AI's DMA length, the SP's task pointer, the
+        // MI's interrupt mask. None of it exists here -- the runtime
+        // reimplements every routine that would touch it -- and the addresses
+        // are not memory the runtime maps, so a store through one lands past
+        // the end of the mapping and takes the process down.
+        //
+        // The window is named exactly rather than as "anything in KSEG1",
+        // because the wider test also catches `lui $at, 0xBF80`, which is how
+        // a compiler loads -1.0f, and stubs a third of the game.
+        if ((word >> 26) == 0x0F) { // lui
+            const uint32_t immediate = word & 0xFFFF;
+            constexpr uint32_t kRcpRegistersFirst = 0xA3F0; // RDRAM registers
+            constexpr uint32_t kRcpRegistersLast = 0xA4A0;  // past the SI
+            constexpr uint32_t kUncachedRdramFirst = 0xA000;
+            constexpr uint32_t kUncachedRdramLast = 0xA080;
+            if ((immediate >= kRcpRegistersFirst && immediate <= kRcpRegistersLast) ||
+                (immediate >= kUncachedRdramFirst && immediate <= kUncachedRdramLast)) {
+                return true;
+            }
+        }
+
+        // A 64-bit float conversion. The recompiler has no case for `trunc.l.d`
+        // and its family, so a function containing one takes the build down
+        // rather than producing a wrong answer -- which means it has to be
+        // caught here.
+        //
+        // Every one of these is libultra's own `__d_to_ll` and friends, which
+        // the runtime implements. A named one never reaches this test; an
+        // unnamed one is stubbed, and the stub is counted so the cost of
+        // having no signature for it is visible.
+        if ((word >> 26) == 0x11) { // COP1
+            // Only an arithmetic COP1 instruction has a function field at all.
+            // The rest of the opcode -- mfc1, mtc1, cfc1, the branches -- puts
+            // register numbers and branch offsets in those bits, and reading
+            // them as a function code stubs a third of the game.
+            const uint32_t fmt = (word >> 21) & 0x1F;
+            constexpr uint32_t kFmtSingle = 16;
+            constexpr uint32_t kFmtDouble = 17;
+            constexpr uint32_t kFmtWord = 20;
+            constexpr uint32_t kFmtLong = 21;
+            const bool arithmetic = fmt == kFmtSingle || fmt == kFmtDouble ||
+                                    fmt == kFmtWord || fmt == kFmtLong;
+            if (arithmetic) {
+                const uint32_t function_field = word & 0x3F;
+                const bool converts_to_long = function_field == 0x25 || // cvt.l
+                                              function_field == 0x08 || // round.l
+                                              function_field == 0x09 || // trunc.l
+                                              function_field == 0x0A || // ceil.l
+                                              function_field == 0x0B;   // floor.l
+                if (fmt == kFmtLong || converts_to_long) {
+                    return true;
+                }
+            }
+        }
+
+        // `cache`, the CPU's cache management instruction. There is no cache
+        // to manage here and the recompiler refuses to translate it, so a
+        // function containing one has to go whole: it is osInvalDCache,
+        // osWritebackDCache, or one of their callers in libultra.
+        if ((word >> 26) == 0x2F) {
+            return true;
+        }
+
         if ((word >> 26) != 0x10) { // not COP0
             continue;
         }
         const uint32_t rs = (word >> 21) & 0x1F;
         const uint32_t rd = (word >> 11) & 0x1F;
         constexpr uint32_t kCop0Status = 12;
-        const bool is_move = (rs == 0x00 /* mfc0 */) || (rs == 0x04 /* mtc0 */);
-        if (is_move && rd == kCop0Status) {
+        // Reading the status register is harmless -- the runtime keeps one per
+        // context and hands it back. Writing it is not: the runtime models the
+        // FR bit, which decides how the odd float registers are addressed, and
+        // refuses every other bit rather than pretend. A function that writes
+        // Status is turning interrupts on or off, which is a hardware routine
+        // by definition.
+        if (rs == 0x00 /* mfc0 */ && rd == kCop0Status) {
             continue;
         }
         return true;
     }
     return false;
+}
+
+/// Calls out of the code we have, to somewhere in this section we have not
+/// looked at yet.
+///
+/// The sweep stops at the first stretch past known code that does not read as
+/// code, because for a section whose end is unknown that stretch is the end of
+/// it. Sometimes it is not: a compiler will park a jump table or a block of
+/// float constants between two runs of functions, and everything past it is
+/// then lost. A `jal` from code we have already validated is proof that there
+/// is a function on the far side, and that is enough to start again there.
+std::vector<uint32_t> calls_past_text(const Rom &rom, const SectionInfo &section,
+                                      const Recovered &recovered) {
+    const uint32_t section_end = section.vram + section.size;
+    std::vector<uint32_t> found;
+    std::set<uint32_t> seen;
+    for (const auto &[start, end] : recovered.functions) {
+        for (uint32_t vram = start; vram < end; vram += 4) {
+            const uint32_t word = rom.word(section.rom + (vram - section.vram));
+            if ((word >> 26) != 0x03) { // jal
+                continue;
+            }
+            const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+            if (target < recovered.text_end || target >= section_end) {
+                continue;
+            }
+            if (recovered.functions.count(target) == 0 && seen.insert(target).second) {
+                found.push_back(target);
+            }
+        }
+    }
+    return found;
 }
 
 void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &report,
@@ -651,7 +756,25 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
         report.notes.push_back("no code was reachable from the entry point of " + section.name);
         return;
     }
-    sweep(rom, section, recovered, report);
+
+    // Sweep, then jump whatever gap the sweep stopped at if something it found
+    // calls across it, and sweep again. Converges in two or three rounds on
+    // every image tried; the bound is there so a pathological one cannot spin.
+    for (int round = 0; round < 8; round++) {
+        sweep(rom, section, recovered, report);
+        const std::vector<uint32_t> seeds = calls_past_text(rom, section, recovered);
+        if (seeds.empty()) {
+            break;
+        }
+        const uint32_t before = recovered.text_end;
+        for (uint32_t seed : seeds) {
+            walk_reachable(rom, section, seed, recovered, report);
+        }
+        if (recovered.text_end <= before) {
+            break;
+        }
+        report.text_gaps_crossed++;
+    }
     if (signatures != nullptr) {
         name_from_signatures(rom, section, *signatures, provides, recovered, report);
     }
@@ -706,22 +829,49 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
 
     report.functions_found += section.functions.size();
 
-    // Now that .text has a boundary, every call in it can be scored. A call
-    // that leaves the section is code this analysis did not find — an overlay,
-    // in practice. A call that stays inside but does not land on a function
-    // start is a boundary we got wrong, and that is the number to watch.
-    for (uint32_t vram = section.vram; vram < text_end_vram; vram += 4) {
-        const uint32_t word = rom.word(section.rom + (vram - section.vram));
-        if ((word >> 26) != 0x03) { // jal
-            continue;
+}
+
+/// Score every call in the image, once every section is known.
+///
+/// A call that leaves every section is code this analysis did not find -- an
+/// overlay, in practice. A call that lands inside one but not on a function
+/// start is a boundary we got wrong, and that is the number to watch. Both
+/// have to be counted here rather than per section, because a game with more
+/// than one segment calls between them constantly and scoring a section on its
+/// own would report every one of those as missing code.
+void score_calls(const Rom &rom, Analysis &analysis) {
+    auto covering = [&](uint32_t target) -> const SectionInfo * {
+        for (const SectionInfo &section : analysis.sections) {
+            if (target >= section.vram && target < section.vram + section.size) {
+                return &section;
+            }
         }
-        const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
-        if (target < section.vram || target >= text_end_vram) {
-            report.calls_outside++;
-        } else if (recovered.functions.count(target)) {
-            report.calls_on_boundary++;
-        } else {
-            report.calls_off_boundary++;
+        return nullptr;
+    };
+
+    for (const SectionInfo &section : analysis.sections) {
+        for (uint32_t vram = section.vram; vram < section.vram + section.size; vram += 4) {
+            const uint32_t word = rom.word(section.rom + (vram - section.vram));
+            if ((word >> 26) != 0x03) { // jal
+                continue;
+            }
+            const uint32_t target = 0x80000000u | ((word & 0x03FFFFFFu) << 2);
+            const SectionInfo *home = covering(target);
+            if (home == nullptr) {
+                analysis.report.calls_outside++;
+                continue;
+            }
+            // The functions in a section are in address order, so this is a
+            // binary search over a few thousand entries per call rather than a
+            // scan over all of them.
+            const auto at = std::lower_bound(
+                home->functions.begin(), home->functions.end(), target,
+                [](const FunctionRange &function, uint32_t vram) { return function.vram < vram; });
+            if (at != home->functions.end() && at->vram == target) {
+                analysis.report.calls_on_boundary++;
+            } else {
+                analysis.report.calls_off_boundary++;
+            }
         }
     }
 }
@@ -829,9 +979,13 @@ void find_overlays(const Rom &rom, Analysis &analysis, const n64sig::Database *s
     }
 
     if (found.empty()) {
+        // Deliberately not phrased as "only the boot segment was recompiled":
+        // by the time this is read a title record may have supplied the
+        // segments outright, which is the other half of the design and the
+        // case Super Mario 64 lands in.
         analysis.report.notes.push_back(
-            "no overlay table found; only the boot segment was recompiled. A game that "
-            "loads code at runtime needs its segments written down in a title record.");
+            "no overlay table found. A game that loads code at runtime and does not tabulate "
+            "where it lives needs its segments written down in a title record.");
         return;
     }
 
@@ -884,8 +1038,92 @@ bool load_runtime_provides(const std::string &path, RuntimeProvides &out, std::s
     return true;
 }
 
+namespace {
+
+/// Which save chip the libultra names in the image point at.
+///
+/// A game linked against `osEepromLongRead` has an EEPROM behind it; one linked
+/// against `osFlashReadArray` has FlashRAM. This does not narrow EEPROM to a
+/// size and says nothing at all about SRAM, which has no libultra routines of
+/// its own -- a game reaches it with a plain PI DMA to 0x08000000, which looks
+/// like any other DMA. So this is evidence, not an answer.
+std::string detect_save_evidence(const Analysis &analysis) {
+    bool eeprom = false;
+    bool flash = false;
+    for (const SectionInfo &section : analysis.sections) {
+        for (const FunctionRange &function : section.functions) {
+            if (function.name.rfind("osEeprom", 0) == 0) {
+                eeprom = true;
+            } else if (function.name.rfind("osFlash", 0) == 0) {
+                flash = true;
+            }
+        }
+    }
+    if (eeprom && flash) {
+        return "both EEPROM and FlashRAM routines are linked in";
+    }
+    if (eeprom) {
+        return "EEPROM routines are linked in";
+    }
+    if (flash) {
+        return "FlashRAM routines are linked in";
+    }
+    return "no libultra save routine was named";
+}
+
+/// Apply a record's function corrections to the sections that cover them.
+void apply_function_records(Analysis &analysis, const TitleRecord &record) {
+    for (const FunctionRange &correction : record.functions) {
+        for (SectionInfo &section : analysis.sections) {
+            if (correction.vram < section.vram || correction.vram >= section.vram + section.size) {
+                continue;
+            }
+            auto at = std::find_if(section.functions.begin(), section.functions.end(),
+                                   [&](const FunctionRange &f) { return f.vram == correction.vram; });
+
+            if (correction.size == 0) {
+                // A boundary the analyser invented. Give its bytes to the
+                // function before it, which is where they belonged.
+                if (at != section.functions.end()) {
+                    if (at != section.functions.begin()) {
+                        std::prev(at)->size += at->size;
+                    }
+                    section.functions.erase(at);
+                    analysis.report.notes.push_back(
+                        "record: dropped the boundary at " + std::to_string(correction.vram));
+                }
+                break;
+            }
+
+            if (at == section.functions.end()) {
+                FunctionRange added = correction;
+                if (added.size == UINT32_MAX) {
+                    added.size = 4;
+                }
+                section.functions.insert(
+                    std::upper_bound(section.functions.begin(), section.functions.end(), added,
+                                     [](const FunctionRange &a, const FunctionRange &b) {
+                                         return a.vram < b.vram;
+                                     }),
+                    added);
+            } else {
+                if (correction.size != UINT32_MAX) {
+                    at->size = correction.size;
+                }
+                if (!correction.name.empty()) {
+                    at->name = correction.name;
+                }
+                at->stub = correction.stub;
+            }
+            break;
+        }
+    }
+}
+
+} // namespace
+
 Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
-                 const RuntimeProvides *provides) {
+                 const RuntimeProvides *provides, const TitleRecord *record) {
     Analysis analysis;
 
     SectionInfo boot;
@@ -912,6 +1150,56 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
     }
 
     find_overlays(rom, analysis, signatures, provides);
+
+    // The record goes on last and wins. Its sections are the ones the analysis
+    // could not find at all, so a section it names that overlaps one already
+    // recovered replaces it rather than being added beside it -- two sections
+    // covering the same address would give the recompiler two functions at it.
+    if (record != nullptr) {
+        for (const SectionInfo &recorded : record->sections) {
+            auto overlapping = std::remove_if(
+                analysis.sections.begin(), analysis.sections.end(), [&](const SectionInfo &s) {
+                    return s.rom < recorded.rom + recorded.size && recorded.rom < s.rom + s.size;
+                });
+            if (overlapping != analysis.sections.end()) {
+                analysis.sections.erase(overlapping, analysis.sections.end());
+            }
+
+            SectionInfo section = recorded;
+            if (section.functions.empty()) {
+                // The usual case: the record says where the segment is and the
+                // sweep says what is in it, which is the division of labour the
+                // whole design is built around.
+                recover_functions(rom, section, analysis.report, section.vram, signatures, provides);
+                if (section.text_size > 0) {
+                    section.size = section.text_size;
+                }
+            }
+            if (section.functions.empty()) {
+                analysis.report.notes.push_back("record: no code was recovered from section \"" +
+                                                section.name + "\"");
+                continue;
+            }
+            analysis.sections.push_back(std::move(section));
+        }
+
+        std::sort(analysis.sections.begin(), analysis.sections.end(),
+                  [](const SectionInfo &a, const SectionInfo &b) { return a.rom < b.rom; });
+
+        apply_function_records(analysis, *record);
+
+        analysis.report.notes.push_back("record: " + record->path);
+        for (const std::string &note : record->notes) {
+            analysis.report.notes.push_back("record: " + note);
+        }
+    }
+
+    score_calls(rom, analysis);
+    analysis.save_type_evidence = detect_save_evidence(analysis);
+    if (record != nullptr && !record->save_type.empty()) {
+        save_type_from_name(record->save_type, analysis.save_type);
+    }
+
     return analysis;
 }
 

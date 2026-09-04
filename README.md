@@ -14,8 +14,11 @@ and deliberately the same shape: a window over a headless pipeline, a library
 of games, per-game `.app` bundles that hold no game data, and a runtime tree
 that carries the forks.
 
-**This is under construction.** [PLAN.md](PLAN.md) has the design, what works
-today, and what does not.
+**This is under construction, and a game does not draw a frame yet.**
+Everything around that does: a ROM is analysed, recompiled, compiled, added to
+the library and launched into a window with the renderer up.
+[PLAN.md](PLAN.md) has the design, the measured numbers, and exactly what
+stands between here and a picture.
 
 ## Quick start
 
@@ -25,8 +28,12 @@ cd n64bundler
 ./N64Bundler/build.sh
 ```
 
-Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`.
-The first build compiles RT64, which takes a while.
+Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`,
+and SDL2 (`brew install sdl2`). The first build compiles RT64, which takes a
+few minutes; everything after that is seconds.
+
+`./N64Bundler/build.sh --tools-only` skips RT64 and the window, and is what to
+use if all you want is the analyser.
 
 ## What is in here
 
@@ -60,7 +67,7 @@ to accept a ROM nobody has decompiled. So it recovers the metadata itself:
 - **`n64rip`** reads the image, identifies the boot chip, works out where the
   boot segment really lands, and recovers function boundaries by following
   calls out from the entry point and then sweeping the code that proves is
-  there. On Super Mario 64 (USA) it recovers about 3,890 functions, and 100% of the
+  there. On Super Mario 64 (USA) it recovers 5,034 functions, and 100% of the
   ROM's internal calls land exactly on one of them — which is the check,
   since a `jal` always names the first instruction of a function.
 
@@ -77,18 +84,32 @@ to accept a ROM nobody has decompiled. So it recovers the metadata itself:
 What it cannot recover, it says so about. Overlays — code the game DMAs out of
 the ROM at runtime — are only found when the game tabulates them, and a title
 that computes its segment addresses in code instead has to have them written
-down in a record under `N64Bundler/titles/<ID>/`.
+down in a record under `N64Bundler/titles/<ID>/`. Super Mario 64 is one of
+those: its engine segment and libgoddard are reached through linker symbols,
+and without the record 1,207 of its calls leave the code that was recovered.
+The records hold addresses, sizes and a hash — never bytes of a game.
 
-Between them, Super Mario 64 recompiles from the cartridge dump alone into
-3.6MB of native arm64 — 3,889 functions, in about a second of compiling. Of
-those, 10 are stubbed: nine drive coprocessor 0 and one is libultra's exception
-preamble, which has no correct division into functions at all. 1,207 calls
-leave the code that was recovered, and those go to the overlays nothing here
-finds.
+Between them, plus the record under `N64Bundler/titles/NSME/`, Super Mario 64
+recompiles from the cartridge dump alone into 3.5MB of native arm64 — 5,034
+functions, in about ten seconds. **Every one of its 14,601 internal calls lands
+on a recovered function boundary, and none of them leaves the code that was
+recompiled.**
+
+Drop the ROM on the window and it lands in the library with a cover and a Play
+button; press Play and a window titled Super Mario 64 opens with RT64 on Metal
+behind it and the game's entry point running on its own thread.
+
+**And then the screen stays black.** 31 functions are stubbed because they
+drive the console's registers and no signature named them, and nine of those
+are the PI — the cartridge DMA. Super Mario 64 loads everything through it, so
+nothing loads. The runtime implements every one of those functions; the only
+missing thing is a signature database wide enough to say which is which.
+[PLAN.md](PLAN.md) has the detail, including why one `libultra.a` is not
+enough.
 
 **So: a game that boots is not a game that finishes, and some ROMs will not
-boot at all.** That is the honest state of it, and the per-title records exist
-to close the gap one title at a time.
+boot at all.** That is the honest state of it, and it has not changed — only
+got more specific.
 
 ## Legal
 

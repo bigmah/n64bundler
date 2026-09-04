@@ -77,9 +77,43 @@ add_executable(n64rip
     tools/n64rip/rom.cpp
     tools/n64rip/analyze.cpp
     tools/n64rip/emit.cpp
+    tools/n64rip/title.cpp
 )
 target_link_libraries(n64rip PRIVATE rabbitizer n64sig_core)
+# xxHash for the ROM hash the runtime validates against, and toml++ for the
+# title records. Both come in header-only, from the recompiler's own vendoring.
+target_include_directories(n64rip PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/thirdparty"
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/N64Recomp/lib/tomlplusplus/include"
+)
 target_compile_options(n64rip PRIVATE -Wall -Wno-unused-parameter)
+
+# ---------------------------------------------------------------------------
+# n64b-port - the recompiler and the compiler, driven.
+#
+# Where its siblings live is baked in rather than looked up, because the app
+# runs it from ~/Applications with launchd's PATH and no idea where the checkout
+# is. build.sh writes the same paths into toolchain.conf for the same reason.
+
+set(RECOMP_BIN_DIR "${CMAKE_BINARY_DIR}/vendor/N64ModernRuntime/librecomp/N64Recomp")
+
+set(MR_MODULE_INCLUDES
+    "${CMAKE_CURRENT_SOURCE_DIR}/include|${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/N64Recomp/include|${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/librecomp/include|${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/ultramodern/include|${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/thirdparty|${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/thirdparty/sse2neon")
+
+add_executable(n64b-port tools/n64b-port/main.cpp)
+target_include_directories(n64b-port PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/thirdparty"
+)
+target_compile_definitions(n64b-port PRIVATE
+    N64B_DEFAULT_RECOMP="${RECOMP_BIN_DIR}/N64Recomp"
+    N64B_DEFAULT_RSP_RECOMP="${RECOMP_BIN_DIR}/RSPRecomp"
+    # What the recompiled C includes: recomp.h, the runtime's headers, and this
+    # tree's own module ABI.
+    # Separated by | rather than the obvious : or ; -- a semicolon is CMake's
+    # own list separator and would split the definition into several.
+    N64B_DEFAULT_INCLUDES="${MR_MODULE_INCLUDES}"
+)
+target_compile_options(n64b-port PRIVATE -Wall -Wno-unused-parameter)
 
 # ---------------------------------------------------------------------------
 # n64b-run

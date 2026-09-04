@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// RT64, wearing ultramodern's renderer interface.
+//
+// ultramodern owns a graphics thread and hands it three kinds of work: a
+// display list the game submitted, a screen update carrying the VI registers
+// at scanout, and a change of graphics settings. RT64 wants exactly those
+// three things, so most of this file is translation rather than logic.
+//
+// The one piece that is not translation is the Core structure. RT64 was
+// written against an emulator plugin API, so it expects pointers to the
+// console's registers and calls back for interrupts. Here there is no
+// emulator: ultramodern models the VI itself and librecomp raises the
+// interrupts. So the registers RT64 reads for scanout point into ultramodern's
+// own VI state, and the ones it would raise an interrupt through point at
+// storage nothing reads.
+
+#include "host.hpp"
+
+#include <SDL.h>
+
+#include <cstring>
+#include <memory>
+
+#include <librecomp/game.hpp>
+#include <librecomp/rsp.hpp>
+
+#include "hle/rt64_application.h"
+
+namespace n64b {
+namespace {
+
+/// The console registers RT64 wants that nothing here models.
+///
+/// The RDP registers exist because a real plugin would drive the RDP through
+/// them; RT64 renders in HLE and librecomp signals DP completion itself, so
+/// these are written and never read. Keeping them as real storage rather than
+/// null pointers means RT64's own bookkeeping works unchanged.
+struct DeadRegisters {
+    uint32_t mi_intr = 0;
+    uint32_t dpc_start = 0;
+    uint32_t dpc_end = 0;
+    uint32_t dpc_current = 0;
+    uint32_t dpc_status = 0;
+    uint32_t dpc_clock = 0;
+    uint32_t dpc_bufbusy = 0;
+    uint32_t dpc_pipebusy = 0;
+    uint32_t dpc_tmem = 0;
+};
+
+/// RT64 also reads instruction memory. Nothing in this runtime has one -- the
+/// RSP is either recompiled microcode or the renderer -- so it gets a blank
+/// one of the right size rather than a null pointer to trip over.
+uint8_t imem[0x1000] = {};
+
+void no_interrupts() {
+    // librecomp raises SP and DP completion itself, on the graphics thread,
+    // around the call that got us here. There is nothing for RT64 to signal.
+}
+
+RT64::UserConfiguration::Antialiasing map_antialiasing(ultramodern::renderer::Antialiasing msaa) {
+    switch (msaa) {
+        case ultramodern::renderer::Antialiasing::MSAA2X: return RT64::UserConfiguration::Antialiasing::MSAA2X;
+        case ultramodern::renderer::Antialiasing::MSAA4X: return RT64::UserConfiguration::Antialiasing::MSAA4X;
+        case ultramodern::renderer::Antialiasing::MSAA8X: return RT64::UserConfiguration::Antialiasing::MSAA8X;
+        default: return RT64::UserConfiguration::Antialiasing::None;
+    }
+}
+
+RT64::UserConfiguration::AspectRatio map_aspect(ultramodern::renderer::AspectRatio ratio) {
+    switch (ratio) {
+        case ultramodern::renderer::AspectRatio::Expand: return RT64::UserConfiguration::AspectRatio::Expand;
+        case ultramodern::renderer::AspectRatio::Manual: return RT64::UserConfiguration::AspectRatio::Manual;
+        default: return RT64::UserConfiguration::AspectRatio::Original;
+    }
+}
+
+RT64::UserConfiguration::RefreshRate map_refresh_rate(ultramodern::renderer::RefreshRate rate) {
+    switch (rate) {
+        case ultramodern::renderer::RefreshRate::Original: return RT64::UserConfiguration::RefreshRate::Original;
+        case ultramodern::renderer::RefreshRate::Manual: return RT64::UserConfiguration::RefreshRate::Manual;
+        default: return RT64::UserConfiguration::RefreshRate::Display;
+    }
+}
+
+ultramodern::renderer::SetupResult map_setup_result(RT64::Application::SetupResult result) {
+    switch (result) {
+        case RT64::Application::SetupResult::DynamicLibrariesNotFound:
+            return ultramodern::renderer::SetupResult::DynamicLibrariesNotFound;
+        case RT64::Application::SetupResult::InvalidGraphicsAPI:
+            return ultramodern::renderer::SetupResult::InvalidGraphicsAPI;
+        case RT64::Application::SetupResult::GraphicsAPINotFound:
+            return ultramodern::renderer::SetupResult::GraphicsAPINotFound;
+        case RT64::Application::SetupResult::GraphicsDeviceNotFound:
+            return ultramodern::renderer::SetupResult::GraphicsDeviceNotFound;
+        default:
+            return ultramodern::renderer::SetupResult::Success;
+    }
+}
+
+/// Where RT64 keeps its shader cache and its own configuration file. Under our
+/// own directory rather than its default so that two frontends on one machine
+/// do not fight over one cache.
+std::filesystem::path rt64_data_path() {
+    const char *home = std::getenv("HOME");
+    std::filesystem::path base = home != nullptr ? std::filesystem::path(home) : std::filesystem::path(".");
+    return base / "Library" / "Application Support" / "N64Bundler" / "rt64";
+}
+
+class RT64Context final : public ultramodern::renderer::RendererContext {
+public:
+    RT64Context(uint8_t *rdram, ultramodern::renderer::WindowHandle window_handle,
+                bool developer_mode) {
+        RT64::Application::Core core{};
+        core.window.window = window_handle.window;
+        core.window.view = window_handle.view;
+
+        // The ROM header, which RT64 hashes to pick up any per-game
+        // configuration it ships. librecomp has the image in memory by now
+        // because the game thread loaded it before it started.
+        std::span<const uint8_t> rom = recomp::get_rom();
+        header_.fill(0);
+        if (rom.size() >= header_.size()) {
+            std::memcpy(header_.data(), rom.data(), header_.size());
+        }
+        core.HEADER = header_.data();
+
+        core.RDRAM = rdram;
+        core.DMEM = dmem;
+        core.IMEM = imem;
+
+        core.MI_INTR_REG = &dead_.mi_intr;
+        core.DPC_START_REG = &dead_.dpc_start;
+        core.DPC_END_REG = &dead_.dpc_end;
+        core.DPC_CURRENT_REG = &dead_.dpc_current;
+        core.DPC_STATUS_REG = &dead_.dpc_status;
+        core.DPC_CLOCK_REG = &dead_.dpc_clock;
+        core.DPC_BUFBUSY_REG = &dead_.dpc_bufbusy;
+        core.DPC_PIPEBUSY_REG = &dead_.dpc_pipebusy;
+        core.DPC_TMEM_REG = &dead_.dpc_tmem;
+
+        // The VI registers RT64 scans out from are ultramodern's, updated on
+        // every screen update just before we are called.
+        ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
+        core.VI_STATUS_REG = &vi->VI_STATUS_REG;
+        core.VI_ORIGIN_REG = &vi->VI_ORIGIN_REG;
+        core.VI_WIDTH_REG = &vi->VI_WIDTH_REG;
+        core.VI_INTR_REG = &vi->VI_INTR_REG;
+        core.VI_V_CURRENT_LINE_REG = &vi->VI_V_CURRENT_LINE_REG;
+        core.VI_TIMING_REG = &vi->VI_TIMING_REG;
+        core.VI_V_SYNC_REG = &vi->VI_V_SYNC_REG;
+        core.VI_H_SYNC_REG = &vi->VI_H_SYNC_REG;
+        core.VI_LEAP_REG = &vi->VI_LEAP_REG;
+        core.VI_H_START_REG = &vi->VI_H_START_REG;
+        core.VI_V_START_REG = &vi->VI_V_START_REG;
+        core.VI_V_BURST_REG = &vi->VI_V_BURST_REG;
+        core.VI_X_SCALE_REG = &vi->VI_X_SCALE_REG;
+        core.VI_Y_SCALE_REG = &vi->VI_Y_SCALE_REG;
+
+        core.checkInterrupts = no_interrupts;
+
+        RT64::ApplicationConfiguration app_config{};
+        app_config.appId = "N64Bundler";
+        app_config.dataPath = rt64_data_path();
+        app_config.detectDataPath = false;
+        app_config.useConfigurationFile = true;
+
+        app_ = std::make_unique<RT64::Application>(core, app_config);
+        app_->userConfig.developerMode = developer_mode;
+        apply_config(ultramodern::renderer::get_graphics_config());
+
+        uint64_t thread_id = 0;
+        pthread_threadid_np(nullptr, &thread_id);
+        const RT64::Application::SetupResult result = app_->setup(uint32_t(thread_id));
+        setup_result = map_setup_result(result);
+        chosen_api = ultramodern::renderer::GraphicsApi::Metal;
+        if (result != RT64::Application::SetupResult::Success) {
+            app_.reset();
+            return;
+        }
+
+        app_->updateUserConfig(true);
+    }
+
+    bool valid() override { return app_ != nullptr; }
+
+    bool update_config(const ultramodern::renderer::GraphicsConfig &old_config,
+                       const ultramodern::renderer::GraphicsConfig &new_config) override {
+        if (app_ == nullptr) {
+            return false;
+        }
+        apply_config(new_config);
+        // Framebuffers are only worth throwing away when what they hold has
+        // changed shape; a refresh rate change leaves them valid.
+        const bool discard = old_config.res_option != new_config.res_option ||
+                             old_config.msaa_option != new_config.msaa_option ||
+                             old_config.hpfb_option != new_config.hpfb_option;
+        app_->updateUserConfig(discard);
+        return true;
+    }
+
+    void enable_instant_present() override {
+        // A newer RT64 has a present mode for this; this one does not, and
+        // presenting a frame early is an optimisation rather than a
+        // correctness requirement.
+    }
+
+    void send_dl(const OSTask *task) override {
+        if (app_ == nullptr) {
+            return;
+        }
+        // Everything in a task is a KSEG0 address; RT64 indexes RDRAM
+        // directly, so the segment bits come off.
+        constexpr uint32_t physical = 0x03FFFFFFu;
+        app_->state->rsp->reset();
+        app_->interpreter->loadUCodeGBI(uint32_t(task->t.ucode) & physical,
+                                        uint32_t(task->t.ucode_data) & physical, true);
+        app_->processDisplayLists(app_->core.RDRAM, uint32_t(task->t.data_ptr) & physical, 0, true);
+    }
+
+    void send_dummy_workload(uint32_t fb_address) override {
+        // What this exists for is the window between the process starting and
+        // the game submitting its first display list, so that the window is
+        // not simply undefined. This RT64 has no way to enqueue an empty
+        // workload, and the swap chain clears, so leaving it is honest.
+    }
+
+    void update_screen() override {
+        if (app_ != nullptr) {
+            app_->updateScreen();
+        }
+    }
+
+    void shutdown() override {
+        if (app_ != nullptr) {
+            app_->end();
+            app_.reset();
+        }
+    }
+
+    uint32_t get_display_framerate() const override {
+        if (app_ == nullptr || app_->appWindow == nullptr) {
+            return 60;
+        }
+        return app_->appWindow->getRefreshRate();
+    }
+
+    float get_resolution_scale() const override {
+        if (app_ == nullptr) {
+            return 1.0f;
+        }
+        // The scale ultramodern reports to the game, so that anything drawn
+        // at native resolution knows how much bigger the target is.
+        return float(app_->sharedQueueResources->resolutionScale.x);
+    }
+
+private:
+    void apply_config(const ultramodern::renderer::GraphicsConfig &config) {
+        RT64::UserConfiguration &user = app_->userConfig;
+        // Metal is the only backend that exists on this platform, and picking
+        // it outright means a misconfigured "Auto" cannot land on a backend
+        // that is not there.
+        user.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Metal;
+        user.antialiasing = map_antialiasing(config.msaa_option);
+        user.aspectRatio = map_aspect(config.ar_option);
+        user.refreshRate = map_refresh_rate(config.rr_option);
+        user.refreshRateTarget = config.rr_manual_value > 0 ? config.rr_manual_value : 60;
+        user.downsampleMultiplier = config.ds_option > 0 ? config.ds_option : 1;
+        user.developerMode = config.developer_mode;
+
+        switch (config.res_option) {
+            case ultramodern::renderer::Resolution::Original:
+                user.resolution = RT64::UserConfiguration::Resolution::Manual;
+                user.resolutionMultiplier = 1.0;
+                break;
+            case ultramodern::renderer::Resolution::Original2x:
+                user.resolution = RT64::UserConfiguration::Resolution::Manual;
+                user.resolutionMultiplier = 2.0;
+                break;
+            default:
+                // Match the window, which is what "Auto" means to everyone who
+                // has not read the enum.
+                user.resolution = RT64::UserConfiguration::Resolution::WindowIntegerScale;
+                break;
+        }
+
+        switch (config.hpfb_option) {
+            case ultramodern::renderer::HighPrecisionFramebuffer::On:
+                user.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::High;
+                break;
+            case ultramodern::renderer::HighPrecisionFramebuffer::Off:
+                user.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Standard;
+                break;
+            default:
+                user.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Automatic;
+                break;
+        }
+
+        user.validate();
+    }
+
+    std::unique_ptr<RT64::Application> app_;
+    DeadRegisters dead_{};
+    std::array<uint8_t, 0x40> header_{};
+};
+
+std::unique_ptr<ultramodern::renderer::RendererContext> create_context(
+    uint8_t *rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
+    return std::make_unique<RT64Context>(rdram, window_handle, developer_mode);
+}
+
+std::string api_name(ultramodern::renderer::GraphicsApi api) {
+    return api == ultramodern::renderer::GraphicsApi::Metal ? "Metal" : "Metal (the only one here)";
+}
+
+} // namespace
+
+ultramodern::renderer::callbacks_t renderer_callbacks() {
+    return ultramodern::renderer::callbacks_t{
+        .create_render_context = create_context,
+        .get_graphics_api_name = api_name,
+    };
+}
+
+} // namespace n64b

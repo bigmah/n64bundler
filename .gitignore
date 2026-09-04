@@ -18,5 +18,10 @@ target/
 build/
 build-*/
 
+# The assembled app. Built by N64Bundler/build.sh, and every path inside it is
+# absolute to whoever built it, so a committed copy would be wrong on any other
+# machine.
+N64Bundler/N64Bundler.app/
+
 # Scratch space used while bringing the stack up.
 .research/

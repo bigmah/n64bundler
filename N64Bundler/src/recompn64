@@ -1,0 +1,260 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# recompn64 - turn an N64 ROM into a game you can play from the library.
+#
+#   1. read the header, normalise the byte order, work out what this is
+#   2. recover the metadata a decompilation would have supplied (n64rip)
+#   3. statically recompile the MIPS to native arm64 (n64b-port)
+#   4. add it to the library, and optionally build a .app
+#
+# Usage: recompn64 [--porcelain] [--app] [--no-open] [--force]
+#                  <rom.z64|.n64|.v64> [more roms...]
+#        recompn64 play     --game-id <id> --rom <rom> --module <lib> --title <s>
+#                           [--fullscreen]
+#        recompn64 make-app --game-id <id> --rom <rom> --module <lib> --title <s>
+#        recompn64 inspect  <rom>
+#
+# By default a ROM is analysed, recompiled and added to the library; it is
+# played from N64Bundler's list. --app additionally builds a .app in
+# ~/Applications. `play` and `make-app` are what the window calls for a ROM
+# that has already been recompiled.
+#
+# No game data is written anywhere but the runtime's own copy of the ROM. The
+# analysis and the module are addresses and translated instructions; the .app
+# is a launcher holding paths.
+#
+# --porcelain adds machine-readable event lines for the GUI and drops the
+# colour codes. Everything else on stdout is log text. The events are:
+#
+#   @@step <index> <total> <title>
+#   @@info <key>=<value>     key in: rom game_id name module analysis app
+#                                    functions coverage cached save_type
+#   @@ok
+#   @@fail <message>
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONF="$SELF_DIR/toolchain.conf"
+
+MODE=pipeline
+case "${1-}" in
+  play|make-app|inspect) MODE="$1"; shift ;;
+esac
+
+PORCELAIN=0
+AUTO_OPEN=1
+MAKE_APP=0
+FORCE=0
+FULLSCREEN=0
+ROMS=()
+ARG_GAME_ID=''; ARG_ROM=''; ARG_MODULE=''; ARG_TITLE=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --porcelain)  PORCELAIN=1; AUTO_OPEN=0 ;;
+    --app)        MAKE_APP=1 ;;
+    --no-open)    AUTO_OPEN=0 ;;
+    --open)       AUTO_OPEN=1 ;;
+    --force)      FORCE=1 ;;
+    --fullscreen) FULLSCREEN=1 ;;
+    --game-id)    ARG_GAME_ID="${2-}"; shift ;;
+    --rom)        ARG_ROM="${2-}"; shift ;;
+    --module)     ARG_MODULE="${2-}"; shift ;;
+    --title)      ARG_TITLE="${2-}"; shift ;;
+    -*)           echo "unknown option: $1" >&2; exit 2 ;;
+    *)            ROMS+=("$1") ;;
+  esac
+  shift
+done
+
+if [ "$PORCELAIN" -eq 1 ]; then
+  bold=''; dim=''; red=''; green=''; off=''
+else
+  bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; green=$'\033[32m'; off=$'\033[0m'
+fi
+
+emit() { [ "$PORCELAIN" -eq 1 ] && printf '@@%s\n' "$*"; return 0; }
+# In porcelain mode the window renders its own heading from the event, so the
+# human-readable copy would show up twice.
+step() { emit "step $1 $2 $3"
+         [ "$PORCELAIN" -eq 1 ] && return 0
+         printf '\n%s==> %s/%s  %s%s\n' "$bold" "$1" "$2" "$3" "$off"; }
+info() { emit "info $1=$2"; }
+note() { printf '%s    %s%s\n' "$dim" "$*" "$off"; }
+ok()   { printf '%s    %s%s\n' "$green" "$*" "$off"; }
+die()  { emit "fail $*"; printf '\n%serror: %s%s\n' "$red" "$*" "$off" >&2; exit 1; }
+
+[ -f "$CONF" ] || die "missing $CONF; re-run N64Bundler/build.sh"
+# shellcheck source=/dev/null
+source "$CONF"
+
+# A window launched from Finder inherits launchd's PATH - /usr/bin:/bin and the
+# two sbins - so Homebrew's clang wrappers and friends are invisible exactly
+# when the app is how you started this, and only then.
+[ -n "${TOOLCHAIN_PATH-}" ] && export PATH="$TOOLCHAIN_PATH:$PATH"
+
+: "${MR_BUILD:?toolchain.conf did not set MR_BUILD}"
+: "${APPS_DIR:=$HOME/Applications}"
+: "${RUNTIME_PROVIDES:=}"
+: "${SIGNATURES:=}"
+: "${TITLES_DIR:=}"
+
+SUPPORT_DIR="$HOME/Library/Application Support/N64Bundler"
+LIBRARY="$SUPPORT_DIR/library.json"
+COVERS="$SUPPORT_DIR/covers"
+GAMES="$SUPPORT_DIR/games"
+LOGS="$SUPPORT_DIR/logs"
+
+for tool in n64rip n64b-port; do
+  [ -x "$MR_BUILD/$tool" ] || die "$MR_BUILD/$tool is missing; re-run N64Bundler/build.sh"
+done
+[ -x "$MR_BUILD/host/n64b-run" ] || die "$MR_BUILD/host/n64b-run is missing; re-run N64Bundler/build.sh"
+
+# --- subcommands -------------------------------------------------------------
+# Both act on a ROM that is already recompiled, so neither needs a compiler.
+
+require_fields() {
+  [ -n "$ARG_GAME_ID" ] || die "$1 needs --game-id"
+  [ -n "$ARG_ROM" ]     || die "$1 needs --rom"
+  [ -n "$ARG_MODULE" ]  || die "$1 needs --module"
+  [ -n "$ARG_TITLE" ]   || die "$1 needs --title"
+  [ -f "$ARG_ROM" ]     || die "the ROM is missing from $ARG_ROM"
+  [ -f "$ARG_MODULE" ]  || die "the recompiled module is missing from $ARG_MODULE; add the ROM again to rebuild it"
+}
+
+register_game() {
+  /usr/bin/python3 "$SELF_DIR/make_game_app.py" \
+    --name "$ARG_TITLE" --game-id "$ARG_GAME_ID" --rom "$ARG_ROM" \
+    --module "$ARG_MODULE" --runtime "$MR_BUILD/host" \
+    --library "$LIBRARY" --covers "$COVERS" "$@"
+}
+
+if [ "$MODE" = inspect ]; then
+  [ "${#ROMS[@]}" -gt 0 ] || die "inspect needs a ROM"
+  exec "$MR_BUILD/n64rip" inspect "${ROMS[0]}"
+fi
+
+if [ "$MODE" = play ]; then
+  require_fields play
+  mkdir -p "$LOGS"
+  fullscreen_args=()
+  [ "$FULLSCREEN" -eq 1 ] && fullscreen_args=(--fullscreen)
+  # Mirrors the generated .app's launcher. The bundle keeps its own copy on
+  # purpose: it has to run with N64Bundler uninstalled.
+  # macOS ships bash 3.2, where "${arr[@]}" on an *empty* array trips `set -u`
+  # with "unbound variable"; ${arr[@]+...} expands to nothing instead.
+  exec "$MR_BUILD/host/n64b-run" \
+    --module "$ARG_MODULE" \
+    --rom "$ARG_ROM" \
+    "${fullscreen_args[@]+"${fullscreen_args[@]}"}" \
+    >>"$LOGS/$ARG_GAME_ID.log" 2>&1
+fi
+
+if [ "$MODE" = make-app ]; then
+  require_fields make-app
+  mkdir -p "$APPS_DIR"
+  app="$(register_game --app --out-dir "$APPS_DIR")" || die "could not build the app bundle"
+  info app "$app"
+  ok "$app"
+  exit 0
+fi
+
+# --- the pipeline ------------------------------------------------------------
+
+process_one() {
+  local rom="$1"
+  [ -f "$rom" ] || die "no such file: $rom"
+  info rom "$rom"
+
+  printf '%s%s%s\n' "$bold" "RecompN64 - $(basename "$rom")" "$off"
+
+  step 1 4 "Reading the ROM"
+  local header
+  header="$("$MR_BUILD/n64rip" inspect "$rom")" \
+    || die "that file is not an N64 ROM. A cartridge dump is 4MB or more and starts with 0x80371240 in one of three byte orders."
+  printf '%s\n' "$header" | sed 's/^/    /'
+  local game_id
+  game_id="$(sed -n 's/^Game ID: *//p' <<<"$header")"
+  [ -n "$game_id" ] || die "the ROM header carried no game ID"
+  info game_id "$game_id"
+
+  local analysis="$GAMES/$game_id/analysis"
+  local module="$GAMES/$game_id/$game_id.dylib"
+  mkdir -p "$analysis" "$GAMES/$game_id"
+
+  step 2 4 "Recovering the metadata from the image"
+  note "An N64 ROM carries no section table and no symbols, so where the code is and where each function starts has to be worked out from the instructions."
+  local rip_args=(analyze "$rom" --out-dir "$analysis")
+  [ -n "$RUNTIME_PROVIDES" ] && [ -f "$RUNTIME_PROVIDES" ] && rip_args+=(--runtime-provides "$RUNTIME_PROVIDES")
+  [ -n "$SIGNATURES" ] && [ -f "$SIGNATURES" ] && rip_args+=(--signatures "$SIGNATURES")
+  [ -n "$TITLES_DIR" ] && [ -d "$TITLES_DIR" ] && rip_args+=(--titles "$TITLES_DIR")
+  local rip_log; rip_log="$(mktemp -t recompn64-rip)"
+  "$MR_BUILD/n64rip" "${rip_args[@]}" 2>&1 | tee "$rip_log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { rm -f "$rip_log"; die "nothing could be recovered from this ROM"; }
+
+  local name functions coverage save_type
+  name="$(sed -n 's/^Title: *//p' "$rip_log")"
+  functions="$(sed -n 's/^\([0-9]*\) functions recovered.*/\1/p' "$rip_log" | head -1)"
+  coverage="$(sed -n 's/.*internal calls land on a function boundary (\(.*\)%).*/\1/p' "$rip_log" | head -1)"
+  save_type="$(sed -n 's/^Save type: *\([a-z_]*\).*/\1/p' "$rip_log" | head -1)"
+  rm -f "$rip_log"
+  [ -n "$name" ] || name="$game_id"
+  name="${name//\//-}"; name="${name//:/-}"
+  info name "$name"
+  info functions "${functions:-0}"
+  info coverage "${coverage:-0}"
+  info save_type "${save_type:-allow_all}"
+
+  step 3 4 "Recompiling $name to native arm64"
+  note "MIPS to C to machine code. The first pass takes a few seconds a megabyte; later ones are cached on the ROM's hash."
+  local port_args=(build --analysis "$analysis" --rom "$rom" --out "$module")
+  [ "$FORCE" -eq 1 ] && port_args+=(--force)
+  local port_log; port_log="$(mktemp -t recompn64-port)"
+  "$MR_BUILD/n64b-port" "${port_args[@]}" 2>&1 | tee "$port_log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { rm -f "$port_log"; die "the recompilation failed (see the log above)"; }
+  # n64b-port speaks the same porcelain protocol, but it is deliberately not
+  # asked for it here: its step counter would collide with this one in the
+  # window. Its English output is the one parse path.
+  local cached; cached="$(sed -n 's/^ *cached: //p' "$port_log" | tail -1)"
+  rm -f "$port_log"
+  [ -f "$module" ] || die "the recompiler did not produce a module"
+  info module "$module"
+  info cached "${cached:-0}"
+  ok "$(du -h "$module" | cut -f1 | tr -d ' ') native module"
+
+  # register_game reads these; the pipeline and the subcommands share one path
+  # into make_game_app.py.
+  ARG_TITLE="$name"; ARG_GAME_ID="$game_id"; ARG_ROM="$rom"; ARG_MODULE="$module"
+
+  local app=""
+  if [ "$MAKE_APP" -eq 1 ]; then
+    step 4 4 "Building $name.app"
+    mkdir -p "$APPS_DIR"
+    app="$(register_game --app --out-dir "$APPS_DIR")" || die "could not build the app bundle"
+    info app "$app"
+    ok "$app"
+  else
+    step 4 4 "Adding $name to the library"
+    register_game >/dev/null || die "could not add the game to the library"
+    ok "in the library - play it from N64Bundler"
+  fi
+
+  printf '\n%s%s is ready.%s %s(%s, %s functions, %s%% of its calls placed)%s\n' \
+    "$green" "$name" "$off" "$dim" "$game_id" "${functions:-0}" "${coverage:-0}" "$off"
+  if [ -n "$app" ] && [ "$AUTO_OPEN" -eq 1 ]; then
+    printf '%sOpening it now. It also lives in %s.%s\n' "$dim" "$APPS_DIR" "$off"
+    open "$app"
+  elif [ -z "$app" ]; then
+    printf '%sPlay it from N64Bundler, or add --app to build a .app in %s.%s\n' \
+      "$dim" "$APPS_DIR" "$off"
+  fi
+  emit ok
+}
+
+if [ "${#ROMS[@]}" -eq 0 ]; then
+  echo "usage: $(basename "$0") [--porcelain] [--app] [--no-open] <rom.z64> [...]" >&2
+  exit 2
+fi
+
+for rom in "${ROMS[@]}"; do
+  process_one "$rom"
+done

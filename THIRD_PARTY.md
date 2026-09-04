@@ -37,7 +37,7 @@ Both upstreams carry their own third-party trees, which come down with them:
 | [im3d](https://github.com/john-chapman/im3d) | RT64 | MIT |
 | [nativefiledialog-extended](https://github.com/btzy/nativefiledialog-extended) | RT64 | Zlib |
 | [metal-cpp](https://developer.apple.com/metal/cpp/) | RT64's Metal backend | Apache-2.0 |
-| [SDL2](https://www.libsdl.org/) | RT64, linked from Homebrew | Zlib |
+| [SDL2](https://www.libsdl.org/) | RT64 and `n64b-run`'s window, audio and controllers; linked from Homebrew | Zlib |
 
 ## Changes carried against upstream
 

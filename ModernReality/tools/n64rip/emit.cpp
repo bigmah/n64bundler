@@ -116,11 +116,16 @@ std::string emit_recomp_toml(const Rom &rom, const Analysis &analysis,
     return out.str();
 }
 
-std::string emit_info_json(const Rom &rom, const Analysis &analysis) {
+std::string emit_info_json(const Rom &rom, const Analysis &analysis,
+                           const TitleRecord *record) {
     std::ostringstream out;
     out << "{\n"
         << "  \"game_id\": " << quote(rom.header.game_id) << ",\n"
         << "  \"internal_name\": " << quote(rom.header.internal_name) << ",\n"
+        << "  \"display_name\": " << quote(display_name(rom, record)) << ",\n"
+        << "  \"save_type\": " << quote(save_type_name(analysis.save_type)) << ",\n"
+        << "  \"save_type_evidence\": " << quote(analysis.save_type_evidence) << ",\n"
+        << "  \"title_record\": " << quote(record == nullptr ? "" : record->path) << ",\n"
         << "  \"byte_order\": " << quote(byte_order_name(rom.original)) << ",\n"
         << "  \"cic\": " << quote(cic_name(rom.cic)) << ",\n"
         << "  \"country\": " << quote(std::string(1, rom.header.country ? rom.header.country : '?'))
@@ -152,11 +157,29 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis) {
         << "  \"invalid_words\": " << analysis.report.invalid_words << ",\n"
         << "  \"named_functions\": " << analysis.report.named_functions << ",\n"
         << "  \"named_new_boundaries\": " << analysis.report.named_new_boundaries << ",\n"
+
         << "  \"stubbed_functions\": " << analysis.report.stubbed_functions << ",\n"
         << "  \"stubbed_unstructured\": " << analysis.report.stubbed_unstructured << ",\n"
         << "  \"merged_boundaries\": " << analysis.report.merged_boundaries << ",\n"
         << "  \"names_without_implementations\": "
         << analysis.report.names_without_implementations << ",\n"
+        << "  \"stubbed\": [\n";
+    // Every address here is a function the runtime would have implemented if
+    // something had named it, and a line somebody can put in a title record.
+    {
+        std::vector<std::string> stubbed;
+        for (const SectionInfo &section : analysis.sections) {
+            for (const FunctionRange &function : section.functions) {
+                if (function.stub && function.name.empty()) {
+                    stubbed.push_back(hex(function.vram));
+                }
+            }
+        }
+        for (size_t i = 0; i < stubbed.size(); i++) {
+            out << "    " << quote(stubbed[i]) << (i + 1 < stubbed.size() ? "," : "") << "\n";
+        }
+    }
+    out << "  ],\n"
         << "  \"notes\": [\n";
     for (size_t i = 0; i < analysis.report.notes.size(); i++) {
         out << "    " << quote(analysis.report.notes[i])

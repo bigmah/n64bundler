@@ -28,7 +28,8 @@ void usage() {
     std::fprintf(stderr,
                  "usage: n64rip inspect <rom>\n"
                  "       n64rip analyze <rom> --out-dir <dir> [--signatures <db>]\n"
-                 "                     [--runtime-provides <list>] [--quiet]\n");
+                 "                     [--runtime-provides <list>] [--title <record.toml>]\n"
+                 "                     [--titles <dir>] [--quiet]\n");
 }
 
 bool write_file(const std::filesystem::path &path, const std::string &contents) {
@@ -83,9 +84,18 @@ void print_analysis(const n64rip::Analysis &analysis) {
                     report.names_without_implementations);
     }
     if (report.stubbed_functions > 0) {
-        std::printf("%zu functions stubbed: they drive coprocessor 0 and no signature named "
-                    "them\n",
+        std::printf("%zu functions stubbed: they drive hardware the runtime models itself, and "
+                    "no signature named them.\n"
+                    "    Each one is a libultra function running as a no-op. Their addresses are "
+                    "in the info file;\n"
+                    "    a title record that names one gets the runtime's implementation of it "
+                    "instead.\n",
                     report.stubbed_functions);
+    }
+    if (report.text_gaps_crossed > 0) {
+        std::printf("%zu island(s) of data inside a section were stepped over, because code on "
+                    "this side of one called code on the far side\n",
+                    report.text_gaps_crossed);
     }
     if (report.merged_boundaries > 0) {
         std::printf("%zu boundaries merged where a branch crossed them\n",
@@ -119,6 +129,8 @@ int main(int argc, char **argv) {
     std::string out_dir;
     std::string signatures_path;
     std::string provides_path;
+    std::string title_path;
+    std::string titles_dir;
     bool quiet = false;
 
     for (int i = 3; i < argc; i++) {
@@ -129,6 +141,10 @@ int main(int argc, char **argv) {
             signatures_path = argv[++i];
         } else if (arg == "--runtime-provides" && i + 1 < argc) {
             provides_path = argv[++i];
+        } else if (arg == "--title" && i + 1 < argc) {
+            title_path = argv[++i];
+        } else if (arg == "--titles" && i + 1 < argc) {
+            titles_dir = argv[++i];
         } else if (arg == "--quiet") {
             quiet = true;
         } else {
@@ -185,8 +201,41 @@ int main(int argc, char **argv) {
         have_provides = true;
     }
 
+    // A record is looked up by game ID unless one was named outright. Most of
+    // the time there is none, and the analysis stands on its own.
+    n64rip::TitleRecord record;
+    bool have_record = false;
+    if (title_path.empty() && !titles_dir.empty() && !rom->header.game_id.empty()) {
+        const std::filesystem::path candidate =
+            std::filesystem::path(titles_dir) / rom->header.game_id / "title.toml";
+        if (std::filesystem::exists(candidate)) {
+            title_path = candidate.string();
+        }
+    }
+    if (!title_path.empty()) {
+        if (!n64rip::load_title_record(title_path, record, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        // A record's addresses were measured against one image. A different
+        // revision of the same cartridge moves them, and applying them anyway
+        // would put sections where there is no code. Analysing without the
+        // record is the right answer -- it is what an unknown ROM gets, and it
+        // still produces a game -- so this is a note rather than a failure.
+        if (record.rom_hash != 0 && record.rom_hash != rom->hash) {
+            std::fprintf(stderr,
+                         "note: %s was measured against a different dump of this cartridge "
+                         "(record %016llx, this ROM %016llx); analysing without it\n",
+                         title_path.c_str(), (unsigned long long)record.rom_hash,
+                         (unsigned long long)rom->hash);
+        } else {
+            have_record = true;
+        }
+    }
+
     const n64rip::Analysis analysis = n64rip::analyze(
-        *rom, have_signatures ? &signatures : nullptr, have_provides ? &provides : nullptr);
+        *rom, have_signatures ? &signatures : nullptr, have_provides ? &provides : nullptr,
+        have_record ? &record : nullptr);
     if (analysis.sections.empty() || analysis.sections.front().functions.empty()) {
         std::fprintf(stderr,
                      "error: no code was recovered from this ROM. It may be encrypted, "
@@ -223,13 +272,18 @@ int main(int argc, char **argv) {
     if (!write_file(symbols, n64rip::emit_symbols_toml(*rom, analysis)) ||
         !write_file(config, n64rip::emit_recomp_toml(*rom, analysis, symbols.string(),
                                                      recomp_rom.string(), generated.string())) ||
-        !write_file(info, n64rip::emit_info_json(*rom, analysis))) {
+        !write_file(info, n64rip::emit_info_json(*rom, analysis,
+                                                 have_record ? &record : nullptr))) {
         return 1;
     }
 
     if (!quiet) {
         print_summary(*rom);
+        std::printf("Title:     %s\n",
+                    n64rip::display_name(*rom, have_record ? &record : nullptr).c_str());
         print_analysis(analysis);
+        std::printf("Save type: %s (%s)\n", n64rip::save_type_name(analysis.save_type),
+                    analysis.save_type_evidence.c_str());
         std::printf("\nwrote %s\n", symbols.string().c_str());
         std::printf("wrote %s\n", config.string().c_str());
         std::printf("wrote %s\n", info.string().c_str());

@@ -154,14 +154,20 @@ struct AnalysisReport {
     /// Signature matches that landed somewhere the walk had not identified as
     /// a function at all.
     size_t named_new_boundaries = 0;
-    /// Functions stubbed because they touch hardware the runtime does not
-    /// model and no signature named them. Each one is a place a wider
-    /// signature database would do better.
+    /// Functions stubbed because they drive hardware -- coprocessor 0, or the
+    /// RCP's registers -- and no signature named them. Each one is a place a
+    /// wider signature database would do better: with a name, the runtime's
+    /// own implementation stands in and the game keeps the behaviour instead
+    /// of losing it.
     size_t stubbed_functions = 0;
     /// Signature matches whose name was thrown away because the runtime has no
     /// implementation to put in the function's place. These are recompiled
     /// from the ROM like any other function.
     size_t names_without_implementations = 0;
+    /// Islands of data inside a section that the sweep stopped at and a call
+    /// from proven code carried it over. Each one is a block of functions that
+    /// would otherwise have been left out of the recompilation entirely.
+    size_t text_gaps_crossed = 0;
     /// Boundaries dissolved because a branch crossed them. Each one was a
     /// switch statement whose cases the walk mistook for separate functions.
     size_t merged_boundaries = 0;
@@ -174,9 +180,35 @@ struct AnalysisReport {
     std::vector<std::string> notes;
 };
 
+/// Which save chip the cartridge had. The names are librecomp's, because they
+/// end up in the module as a `recomp::SaveType`.
+///
+/// Nothing in a ROM states this. What the image does show is which libultra
+/// save routines are linked into it, and that narrows it to a family --
+/// EEPROM, FlashRAM, SRAM -- but not to a size. `AllowAll` is the honest
+/// answer for a ROM nobody has written a record for: it lets every save path
+/// work and reports the larger EEPROM, which is right for more games than
+/// either specific guess would be.
+enum class SaveType {
+    None,
+    Eep4k,
+    Eep16k,
+    Sram,
+    Flashram,
+    AllowAll,
+};
+
+const char *save_type_name(SaveType type);
+bool save_type_from_name(const std::string &name, SaveType &out);
+
 struct Analysis {
     std::vector<SectionInfo> sections;
     AnalysisReport report;
+    /// What the module tells the runtime to use.
+    SaveType save_type = SaveType::AllowAll;
+    /// The family the libultra names in the image point at, before the record
+    /// or the AllowAll default has a say. Printed, not acted on.
+    std::string save_type_evidence;
 };
 
 /// What the runtime can stand in for.
@@ -195,11 +227,49 @@ using RuntimeProvides = std::unordered_set<std::string>;
 /// file cannot be read.
 bool load_runtime_provides(const std::string &path, RuntimeProvides &out, std::string &error);
 
+// ---------------------------------------------------------------------------
+// Title records
+//
+// What the analysis cannot recover from the image, written down once per game
+// and checked into the repo. A record holds addresses, sizes and a hash --
+// measurements of a cartridge, never bytes of one.
+
+struct TitleRecord {
+    /// Where it was read from, for the log line that says a record was used.
+    std::string path;
+    std::string game_id;
+    /// Overrides the name derived from the ROM header.
+    std::string display_name;
+    /// Empty when the record does not pin one down.
+    std::string save_type;
+    /// The image the record was measured against. Zero means "any dump of this
+    /// cartridge", which is the right default for anything but a bug workaround.
+    uint64_t rom_hash = 0;
+    /// Segments the analyser could not find, each with its own functions if the
+    /// record lists them. Usually it does not, and the sweep fills them in.
+    std::vector<SectionInfo> sections;
+    /// Function boundaries the analyser got wrong, matched by vram. A size of
+    /// zero deletes the boundary instead of correcting it.
+    std::vector<FunctionRange> functions;
+    std::vector<std::string> notes;
+};
+
+/// Read a title record. Returns false with `error` set if the file is not
+/// readable or not a record; a missing file is an error, since the caller only
+/// asks for one it decided exists.
+bool load_title_record(const std::string &path, TitleRecord &out, std::string &error);
+
+/// What the game is called in the library and on the .app, derived from the
+/// header's shouted internal name unless a record says otherwise.
+std::string display_name(const Rom &rom, const TitleRecord *record = nullptr);
+
 /// Recover sections and functions from a loaded ROM. With a signature database,
 /// libultra functions are additionally named, which is what lets the recompiler
-/// substitute the runtime's implementations for them.
+/// substitute the runtime's implementations for them. With a title record, what
+/// the analysis could not find is filled in from it, and the record wins.
 Analysis analyze(const Rom &rom, const n64sig::Database *signatures = nullptr,
-                 const RuntimeProvides *provides = nullptr);
+                 const RuntimeProvides *provides = nullptr,
+                 const TitleRecord *record = nullptr);
 
 // ---------------------------------------------------------------------------
 // Output
@@ -215,7 +285,8 @@ std::string emit_recomp_toml(const Rom &rom, const Analysis &analysis,
 
 /// Everything the pipeline needs to know about the ROM, for the library entry
 /// and for the cache key.
-std::string emit_info_json(const Rom &rom, const Analysis &analysis);
+std::string emit_info_json(const Rom &rom, const Analysis &analysis,
+                           const TitleRecord *record = nullptr);
 
 } // namespace n64rip
 

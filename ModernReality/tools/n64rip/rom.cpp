@@ -4,6 +4,10 @@
 
 #include "n64rip.hpp"
 
+// Header-only, so nothing else has to link xxHash to agree on the hash.
+#define XXH_INLINE_ALL
+#include "xxHash/xxhash.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -87,15 +91,11 @@ uint32_t crc32(std::span<const uint8_t> bytes) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-/// FNV-1a over the whole image. Only ever compared against itself, so the
-/// choice of function matters less than that it is stable across versions.
+/// The hash librecomp validates a stored ROM against, so the module the
+/// pipeline builds and the runtime that loads it agree on which image this is
+/// without either of them having to hash it a second way.
 uint64_t hash_image(std::span<const uint8_t> bytes) {
-    uint64_t h = 0xCBF29CE484222325ull;
-    for (uint8_t byte : bytes) {
-        h ^= byte;
-        h *= 0x100000001B3ull;
-    }
-    return h;
+    return XXH3_64bits(bytes.data(), bytes.size());
 }
 
 Cic identify_cic(const Rom &rom) {

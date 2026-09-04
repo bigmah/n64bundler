@@ -67,7 +67,9 @@ which finds them in a good share of titles and misses them in the rest.
 So the honest statement, and the one the README makes: **a game that boots is
 not a game that finishes, and some ROMs will not boot at all.** The design
 answer is the same one DolBundler uses for tuning — a per-title record checked
-into the repo:
+into the repo. Super Mario 64 is the case that proves both halves: the analyser
+finds neither of its two extra code segments on its own, and with them written
+down every call in the image is placed.
 
 ```
 N64Bundler/titles/NSME/title.toml     sections n64rip could not find on its own,
@@ -91,11 +93,11 @@ game.z64
   │
   │  2. Analyse         n64rip: CIC/IPL3 detection, boot segment bounds,
   │                     function boundary recovery, overlay DMA tables,
-  │                     audio microcode identification
-  │                        → <ID>.symbols.toml, <ID>.recomp.toml, <ID>.rsp.toml
+  │                     libultra naming, the title record if there is one
+  │                        → <ID>.symbols.toml, <ID>.recomp.toml, <ID>.info.json
   │
   │  3. Recompile       N64Recomp  symbols.toml + rom → C
-  │                     RSPRecomp  audio ucode      → C
+  │                     RSPRecomp  audio ucode      → C   (not wired up yet)
   │
   │  4. Compile         clang: C → arm64 <ID>.dylib, one module per game
   │                     exporting the n64b_module_v1 descriptor
@@ -146,8 +148,8 @@ ultramodern call) resolve against the host at load time, which is what
 n64bundler/
   N64Bundler/            the glue — the window, the pipeline, the packaging
     build.sh             builds everything and installs the app
-    forks.sh             push a change back through the nested forks
     gui/                 the Dioxus window (Rust)
+    patches/             what upstream does not carry yet, applied by build.sh
     src/
       recompn64          the pipeline, usable on its own, porcelain for the GUI
       make_game_app.py   library entry, cover art, .app only with --app
@@ -156,10 +158,11 @@ n64bundler/
   ModernReality/         the runtime and the tools around it
     tools/
       n64rip             ROM → symbols.toml  (the analyser)
+      n64sig             libultra*.a → a signature database
       n64b-port          drives N64Recomp and compiles the module
-      n64b-run           the host: dlopen a module, RT64 + librecomp
+    host/                n64b-run: dlopen a module, RT64 + librecomp
     include/modernreality/module_abi.h
-    src/                 renderer, input, audio and RSP glue for the host
+    src/ultra_gaps.cpp   the libultra helpers librecomp does not carry
     vendor/
       N64ModernRuntime/  submodule; carries N64Recomp inside it
       rt64/              submodule
@@ -176,42 +179,65 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 |---|---|
 | N64Recomp builds on macOS arm64 | done — Apple clang 17 |
 | N64ModernRuntime builds on macOS arm64 | done — ultramodern + librecomp link |
-| RT64 builds on macOS arm64 | done — `rt64.dylib`, native Metal backend |
-| `n64rip` boundary recovery | done — 100% of Super Mario 64's internal calls land on a recovered boundary |
+| RT64 builds on macOS arm64 | done — static, native Metal backend |
+| `n64rip` boundary recovery | done — 100% of Super Mario 64's calls land on a recovered boundary |
 | `n64sig` libultra naming | done — fingerprints a `libultra*.a` and names what it finds in a ROM |
-| **A bare ROM recompiles to native arm64** | **done** — Super Mario 64 (USA), 3,889 functions, 21MB of C, 3.6MB of Mach-O arm64 in about a second |
-| module ABI and `n64b-port` | next |
-| `n64b-run` host | not started |
-| `recompn64` pipeline | not started |
-| Dioxus window | not started |
-| `.app` packaging | not started |
-| per-title records | not started |
+| A bare ROM recompiles to native arm64 | done — Super Mario 64 (USA), 5,034 functions, 3.5MB of Mach-O arm64 in about ten seconds |
+| module ABI and `n64b-port` | done — one dylib per game, cached on the ROM hash |
+| `n64b-run` host | done — RT64 on Metal, SDL audio and input, `dlopen`s a module |
+| `recompn64` pipeline | done — four steps, porcelain protocol |
+| Dioxus window | done — library, live console, per-game settings |
+| `.app` packaging | done — cover art, icon, launcher holding no game data |
+| per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
+| **a game that draws a frame** | **not yet** — see below |
 
 ### Where Super Mario 64 stands
 
 ```
-3,889 functions recovered: 29 by following calls, 3,862 by sweeping
-10,336 of 10,336 internal calls land on a function boundary (100.00%)
+5,034 functions recovered: 31 by following calls, 5,003 by sweeping
+14,601 of 14,601 internal calls land on a function boundary (100.00%)
+0 calls point outside every section found
 35 functions named from libultra signatures
-9 functions stubbed: they drive coprocessor 0 and no signature named them
-1 function stubbed: hand-written assembly that does not divide into functions
-1 boundary merged where a branch crossed it
-1,207 calls point outside every section found; that code was not recompiled
+31 functions stubbed: they drive hardware and no signature named them
 ```
 
-The last line is the honest one. Those 1,207 calls go to Super Mario 64's
-overlays, which it addresses through linker symbols rather than a table, so
-nothing here finds them. The boot segment is recompiled and the rest is not,
-which is exactly the coverage limit this design predicted and exactly what a
-title record exists to fix.
+Every call in the image now lands on a function this analysis recovered, and
+none of them leaves the code it recompiled. That took the title record: Super
+Mario 64 loads two further code segments — the engine, which is most of the
+game's logic, and libgoddard, the Mario head on the file select screen — and it
+addresses both through linker symbols rather than through a DMA table, so
+nothing in the image points at them. Written down once, they are found every
+time. Without the record the same ROM recovers 3,890 functions and 1,207 calls
+leave the code.
 
-### The second gap: libultra has to be named
+The pipeline runs end to end: drop the ROM on the window, and about ten seconds
+later Super Mario 64 is in the library with a cover, a `Play` button, and
+optionally a `.app` in `~/Applications`. Pressing Play opens a window titled
+Super Mario 64, brings up RT64 on Metal, allocates RDRAM, loads the ROM, and
+starts the game's entry point on its own thread.
 
-Recovering boundaries was the first thing a bare ROM does not give us. Names
-are the second, and they matter more than they sound like they should.
+**And then the screen stays black, and this is why.** The 31 stubbed functions
+are libultra, and between them they touch every register block on the machine:
+
+```
+PI 9   VI 14   SP 10   AI 8   MI 7   SI 5
+```
+
+The PI ones are the ones that matter. Super Mario 64 DMAs everything out of the
+cartridge — levels, textures, the engine segment itself — through
+`osPiStartDma`, and with the PI path stubbed the DMA never happens, the
+completion message never arrives, and the game waits on a queue forever. The
+runtime implements every one of those functions. It is only that nothing has
+told the recompiler which functions they are.
+
+### The second gap: libultra has to be named, and one archive is not enough
+
+Recovering boundaries was the first thing a bare ROM does not give us, and that
+one is solved. Names are the second, and they are what stands between this and
+a game that draws.
 
 A game built with libultra calls `osCreateThread`, `osViSwapBuffer`,
-`osSpTaskStart` and two hundred others, and none of that code can run as
+`osPiStartDma` and two hundred others, and none of that code can run as
 recompiled MIPS: it talks to hardware that does not exist here. The runtime
 reimplements all of it — and N64Recomp already knows to substitute those
 implementations, because it carries a list of the names
@@ -219,33 +245,63 @@ implementations, because it carries a list of the names
 and `renamed_funcs`). A decompilation project supplies the names from its elf
 and the substitution happens for free.
 
-Recovered symbols have no names, so none of it fires, and the recompiler
-translates libultra's own `mtc0`/`mfc0` and MMIO code instead. That is what the
-first Super Mario 64 build hit: `Unhandled cop0 register in mfc0: 10`, which is
-`EntryHi`, in what is certainly one of libultra's TLB routines.
+`n64sig` supplies them instead, by fingerprinting the library. libultra shipped
+as a static archive, so `osCreateThread` is byte-identical in every game linked
+against the same build of it, and matching it is the problem IDA's FLIRT
+signatures solve. Each word carries a mask taken from the object file's own
+relocations, so the fields the linker filled in are ignored and the rest is
+compared exactly.
 
-The fix is to identify libultra functions by their machine code. libultra
-shipped as a static library, so `osCreateThread` is byte-identical in every
-game built against the same version, and matching it is the same problem IDA's
-FLIRT signatures solve. The material is freely available: the decompilation
-projects ship the `libultra*.a` archives, with symbols, and a signature
-database built from them names the functions in any ROM.
+**"The same build of it" is the whole difficulty.** libultra went through half
+a dozen revisions between 1996 and 2000, and a game pins whichever one its SDK
+shipped. Fingerprinted against the archive this machine has, Super Mario 64
+matches 35 functions and misses the rest — and the misses are not marginal:
+that archive's `__osDisableInt` is 28 instructions long and threads a global
+interrupt mask through, where Super Mario 64's is the eight-instruction version
+that predates it. They are the same function and share not one word.
 
-Once they are named, N64Recomp's existing lists do the rest, which is why this
-is the next thing to build rather than a later refinement.
+So the fix is a database built from several revisions rather than one, which is
+a matter of having the archives rather than of writing code. Failing that, a
+title record can name a function outright — that is what the `[[function]]`
+entries are for, and the addresses to fill in are the `stubbed` list `n64rip`
+writes into `<ID>.info.json`.
+
+Until then, a function that drives hardware and has no name is stubbed rather
+than translated. That is a deliberate choice and it is the difference between a
+game that does nothing and a process that dies: libultra's own code writes to
+the RCP's registers at `0xA4xxxxxx`, the runtime maps only KSEG0, and the store
+lands past the end of the mapping. Stubbed, it is a no-op and everything else
+still runs.
 
 ## Roadmap
 
-1. **`n64rip`** — header, CIC, boot segment, function recovery, symbols TOML.
-   Checked against Super Mario 64 (USA), whose decompilation gives a ground
-   truth to score the recovered function list against.
-2. **`n64b-port`** — run N64Recomp over the analyser's output, compile the C to
-   a module, cache on the ROM hash.
-3. **`n64b-run`** — the host. RT64 window, SDL input and audio, librecomp
-   configuration, `dlopen` of a module.
-4. **`recompn64`** — the four-step pipeline with the porcelain protocol.
-5. **The window** — library, live console, per-game settings, Create App.
-6. **Per-title records** and the overlay work they exist to hold.
+Everything the plan set out is built. What is left is coverage, which is
+measurement and data rather than design.
+
+1. ~~**`n64rip`**~~ — done. Header, CIC, boot segment, function recovery,
+   overlay tables, save-type evidence, title records, symbols TOML.
+2. ~~**`n64b-port`**~~ — done. Runs N64Recomp over the analyser's output,
+   writes the module descriptor, compiles to one arm64 dylib, caches on the ROM
+   hash plus the tools' revisions and the compiler flags.
+3. ~~**`n64b-run`**~~ — done. RT64 on Metal, SDL window, audio and input,
+   librecomp configuration, `dlopen` of a module.
+4. ~~**`recompn64`**~~ — done. The four-step pipeline with the porcelain
+   protocol.
+5. ~~**The window**~~ — done. Library, live console, per-game settings, Create
+   App.
+6. ~~**Per-title records**~~ — done, and Super Mario 64 has one.
+
+What is actually next:
+
+1. **A wider signature database.** Several libultra revisions rather than one.
+   This is the whole difference between a game that boots and a game that does
+   not, and it needs archives rather than code.
+2. **Audio microcode.** `RSPRecomp` is built and the module ABI carries a slot
+   for the result; nothing identifies which microcode a ROM uses yet, so
+   `get_rsp_microcode` returns nullptr and an audio task is reported rather
+   than run.
+3. **A second title.** Every number here is Super Mario 64's. The analyser has
+   been checked against one game, and one game is not a sample.
 
 ## Not in scope yet
 

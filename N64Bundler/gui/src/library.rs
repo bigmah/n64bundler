@@ -125,8 +125,12 @@ fn read_analysis(game_id: &str) -> (u64, f64) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return (0, 0.0);
     };
+    // Anchored on the two-space indent of a top-level key. The sections array
+    // has a "functions" of its own -- how many are in that one section -- and
+    // an unanchored search finds it first and reports the boot segment as the
+    // whole game.
     let number = |key: &str| -> f64 {
-        text.split(&format!("\"{key}\":"))
+        text.split(&format!("\n  \"{key}\":"))
             .nth(1)
             .and_then(|rest| {
                 let trimmed = rest.trim_start();

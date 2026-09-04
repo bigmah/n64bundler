@@ -267,6 +267,15 @@ than these, and emitting a name it does not implement is a link error. Most
 should be unreachable once the public API is substituted. Something in that
 "most" is not.
 
+Where it stops is not a layout problem, and that was worth ruling out. The
+segment address is confirmed from three directions: the correlation above, the
+absence of any DMA for it in the runtime's own log, and the addresses the boot
+code builds — boot's data ends at 0x8014C2E0 and this segment's code starts at
+0x8014CA20, which is what a `.bss` hole between two segments looks like and
+exactly the 0x36D0 the load addresses differ by. What is left is a wrong value
+somewhere in the game's state, and finding it needs an instruction trace.
+N64Recomp has a `trace_mode` for precisely this and nothing here drives it yet.
+
 The pipeline runs end to end: drop the ROM on the window, and about ten seconds
 later Super Mario 64 is in the library with a cover, a `Play` button, and
 optionally a `.app` in `~/Applications`. Pressing Play opens a window titled

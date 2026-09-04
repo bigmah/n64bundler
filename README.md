@@ -107,6 +107,15 @@ missing thing is a signature database wide enough to say which is which.
 [PLAN.md](PLAN.md) has the detail, including why one `libultra.a` is not
 enough.
 
+A second ROM goes further. Mario Builder 64, a Super Mario 64 romhack, links
+against exactly the libultra a signature database could be built from here, so
+its whole libultra API is named and substituted — it boots, brings up its
+threads, relocates its main segment, runs its game loop and submits an RSP
+task before it stops. Two titles is enough to see the shape of the problem:
+with the right libultra a ROM gets into its own code and the work left is
+finding segments; without it, a ROM stops inside libultra and finding segments
+does not help.
+
 **So: a game that boots is not a game that finishes, and some ROMs will not
 boot at all.** That is the honest state of it, and it has not changed — only
 got more specific.

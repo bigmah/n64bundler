@@ -55,6 +55,11 @@ target_link_libraries(n64b-run PRIVATE
     modernreality_abi
     librecomp
     ultramodern
+    # Also force-loaded below. Named here as well so that the link depends on
+    # it: without that, adding a libultra helper to it leaves the host linked
+    # against yesterday's copy and a game fails to open with a symbol that was
+    # built a minute ago.
+    modernreality_ultra_gaps
     rt64
     ${SDL2_LIBRARIES}
 )
@@ -86,4 +91,3 @@ target_link_options(n64b-run PRIVATE
     "-Wl,-force_load,$<TARGET_FILE:ultramodern>"
     "-Wl,-force_load,$<TARGET_FILE:modernreality_ultra_gaps>"
 )
-add_dependencies(n64b-run modernreality_ultra_gaps)

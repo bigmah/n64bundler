@@ -865,6 +865,51 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
     const std::set<uint32_t> call_targets =
         collect_call_targets(rom, section, recovered.text_end, recovered);
 
+    // A tail call names a function too.
+    //
+    // A `j` leaving the function it sits in is how a compiler writes `return
+    // f(...)`, and its target is the first instruction of f exactly as a
+    // `jal`'s is. The sweep has no reason to see that: it walks a function to
+    // its terminator and the terminator here *is* the jump, so whatever
+    // follows never gets looked at and the target keeps whatever boundary it
+    // inherited.
+    //
+    // Left alone the cost is not a missing name, it is a missing function. The
+    // stub pass sees a jump out of the function to something that is not a
+    // function start, decides the code does not divide into functions, and
+    // stubs the whole thing. In Mario Builder 64 that silently removed the
+    // routine that runs four of the game's initialisers and tail calls into
+    // the fifth.
+    for (const auto &[start, end] : std::map<uint32_t, uint32_t>(recovered.functions)) {
+        for (uint32_t vram = start; vram < end; vram += 4) {
+            const uint32_t word = rom.word(section.rom + (vram - section.vram));
+            if ((word >> 26) != 0x02) { // j
+                continue;
+            }
+            const uint32_t target = (vram & 0xF0000000u) | ((word & 0x03FFFFFFu) << 2);
+            if (target >= start && target < end) {
+                continue; // a long branch inside this function, not a tail call
+            }
+            if (target < section.vram || target >= recovered.text_end) {
+                continue; // out of the section; the recompiler resolves those
+            }
+            if (recovered.functions.count(target) != 0) {
+                continue; // already a boundary
+            }
+            auto containing = recovered.functions.upper_bound(target);
+            if (containing == recovered.functions.begin()) {
+                continue;
+            }
+            --containing;
+            if (containing->second <= target) {
+                continue;
+            }
+            recovered.functions[target] = containing->second;
+            containing->second = target;
+            report.split_boundaries++;
+        }
+    }
+
     // A `jal` names the first instruction of a function, so a call landing in
     // the middle of one we recovered means we ran two functions together.
     // Split them. Left alone the recompiler finds the same boundary while

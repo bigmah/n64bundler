@@ -47,6 +47,11 @@ constexpr size_t kSlots = 8192;
 struct Count {
     const char *name;
     uint64_t hits;
+    /// The trace index this was last entered at. When a game ends up spinning
+    /// in two functions, the ring buffer fills with those two and says nothing
+    /// about how it got there; the most recently entered functions that are
+    /// not the spin are what does.
+    uint64_t last_seen;
 };
 Count counts[kSlots];
 
@@ -56,11 +61,13 @@ void record(const char *name) {
         Count &entry = counts[(slot + probe) % kSlots];
         if (entry.name == name) {
             entry.hits++;
+            entry.last_seen = next.load(std::memory_order_relaxed);
             return;
         }
         if (entry.name == nullptr) {
             entry.name = name;
             entry.hits = 1;
+            entry.last_seen = next.load(std::memory_order_relaxed);
             return;
         }
     }
@@ -86,6 +93,43 @@ void dump_counts() {
     }
     if (found == 0) {
         return;
+    }
+    if (std::getenv("N64B_TRACE_ALL") != nullptr) {
+        // Every function entered, however rarely. What the top twenty answer is
+        // "where is it spending its time"; what this answers is "did it ever
+        // get here at all", which is the question when something ran once and
+        // did the wrong thing.
+        std::fprintf(stderr, "\n--- every function this game entered ---\n");
+        for (const Count &entry : counts) {
+            if (entry.name != nullptr) {
+                std::fprintf(stderr, "%llu %s\n", (unsigned long long)entry.hits, entry.name);
+            }
+        }
+    }
+    {
+        // The last dozen distinct functions to run, newest first.
+        Count *recent[12] = {};
+        size_t kept = 0;
+        for (Count &entry : counts) {
+            if (entry.name == nullptr) {
+                continue;
+            }
+            size_t at = kept < 12 ? kept++ : 12;
+            while (at > 0 && (at == 12 || recent[at - 1]->last_seen < entry.last_seen)) {
+                if (at < 12) {
+                    recent[at] = recent[at - 1];
+                }
+                at--;
+            }
+            if (at < 12) {
+                recent[at] = &entry;
+            }
+        }
+        std::fprintf(stderr, "\n--- the last distinct functions to run, newest first ---\n");
+        for (size_t i = 0; i < kept; i++) {
+            std::fprintf(stderr, "  %s (%llu times)\n", recent[i]->name,
+                         (unsigned long long)recent[i]->hits);
+        }
     }
     std::fprintf(stderr, "\n--- the functions this game spent its time in ---\n");
     for (size_t i = 0; i < found; i++) {
@@ -158,7 +202,9 @@ void n64b::install_trace(bool catch_signals) {
         // nothing to print anyway unless the module was built with --trace.
         return;
     }
-    for (int signal_number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL}) {
+    // SIGTERM and SIGINT as well: a game that runs is one you stop
+    // rather than one that stops itself, and the trace is wanted either way.
+    for (int signal_number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTERM, SIGINT}) {
         std::signal(signal_number, [](int number) {
             dump();
             std::fprintf(stderr, "(the game took signal %d)\n", number);

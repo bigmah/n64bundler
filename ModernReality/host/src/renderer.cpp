@@ -219,6 +219,7 @@ public:
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(uint32_t(task->t.ucode) & physical,
                                         uint32_t(task->t.ucode_data) & physical, true);
+        frames_++;
         // Whether the renderer knows this game's microcode at all is the other
         // half of a black window, and it is knowable exactly once.
         static bool first = true;
@@ -250,9 +251,12 @@ public:
             static int frames = 0;
             if (frames % 60 == 0) {
                 const ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
-                std::fprintf(stderr, "vi: origin 0x%08X width %u, game framebuffer 0x%08X\n",
+                std::fprintf(stderr,
+                             "vi: origin 0x%08X width %u, game framebuffer 0x%08X, "
+                             "%llu display lists so far\n",
                              vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
-                             uint32_t(osViGetCurrentFramebuffer()));
+                             uint32_t(osViGetCurrentFramebuffer()),
+                             (unsigned long long)frames_);
             }
             frames++;
         }
@@ -329,6 +333,8 @@ private:
 
     std::unique_ptr<RT64::Application> app_;
     bool developer_ = false;
+    /// Display lists submitted, which is the game's own frame count.
+    uint64_t frames_ = 0;
     DeadRegisters dead_{};
     std::array<uint8_t, 0x40> header_{};
 };

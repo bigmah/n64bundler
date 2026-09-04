@@ -28,6 +28,16 @@ size = 0x118460
 # `n64b-port --trace` and reading the address the runtime could not resolve out
 # of the last few hundred entries the host printed. Each one moved the game a
 # little further into its own code; the fifth got it to its render loop.
+# Mario Builder 64 reads its controllers by driving the serial interface
+# itself rather than through libultra's `osContStartReadData`, so librecomp has
+# nothing to substitute and the game blocks forever on an interrupt that never
+# comes. The signature database has this function from a build 4 bytes shorter,
+# which is near enough to be sure and not near enough to match, so it is named
+# here. ModernReality supplies the implementation.
+[[function]]
+vram = 0x80132A90
+name = "__osSiRawStartDma"
+
 [[function]]
 vram = 0x80124FC0
 
@@ -55,3 +65,9 @@ vram = 0x8013EAA0
 
 [[function]]
 vram = 0x8013FC40
+
+[[function]]
+vram = 0x801B7BB4
+
+[[function]]
+vram = 0x801B7F00

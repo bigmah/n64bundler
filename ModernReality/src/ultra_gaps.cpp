@@ -65,6 +65,28 @@ extern "C" void __ll_to_d_recomp(uint8_t *rdram, recomp_context *ctx) {
     ctx->f0.d = (double)(int64_t)pair(ctx->r4, ctx->r5);
 }
 
+// --- the serial interface ----------------------------------------------------
+//
+// librecomp models the controller at the level of the public API --
+// `osContStartReadData` and friends -- and substitutes those. A game that
+// drives the serial interface itself gets nothing: it programs the SI
+// registers, which are now ordinary memory, and then blocks forever on the
+// interrupt that would have told it the transfer finished. Mario Builder 64
+// does exactly that, and it is not unusual; reading the pads directly is a
+// standard way to shave a frame of input latency, so any runtime that accepts
+// arbitrary ROMs meets it eventually.
+//
+// Completing the transfer is the part that matters. The PIF's reply is left as
+// it is, so a game reading its controllers this way sees no buttons pressed --
+// which is a game that runs and does not respond, rather than a game that
+// hangs on its first frame.
+
+extern "C" void __osSiRawStartDma_recomp(uint8_t *rdram, recomp_context *ctx) {
+    (void)rdram;
+    ultramodern::send_si_message();
+    ctx->r2 = 0;
+}
+
 // --- 64-bit integer arithmetic -----------------------------------------------
 // librecomp has the division and shift pair but not these two. They would
 // translate, but a native modulo is both faster and exactly right, and having

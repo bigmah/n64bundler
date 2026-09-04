@@ -190,7 +190,7 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | `.app` packaging | done — cover art, icon, launcher holding no game data |
 | per-title records | done — `N64Bundler/titles/NSME/title.toml` closes Super Mario 64's coverage |
 | a second title | done — Mario Builder 64 recompiles too, at 100% coverage |
-| **a game that draws a frame** | **not yet** — both boot; see below |
+| **a game that draws a frame** | **nearly** — one renders 19, all of them black; see below |
 
 ### Where Super Mario 64 stands
 
@@ -280,13 +280,20 @@ it could not resolve to the record" took Mario Builder 64 from dying on its
 first indirect call to running its game loop. Every one of those five was a
 function nothing calls directly.
 
-What stops it is one message that never arrives. Its render thread does
-`osRecvMesg` on the vblank queue, sends its display list, and blocks on the
-second `osRecvMesg` forever -- which is why exactly one display list is
-submitted and `osViSwapBuffer` is never called at all. The framebuffer it would
-hand over is fine: watching `0x80266EF8` shows the game writing `0x003C3340`
-into it, correctly, early on. Finding which vblank handler was never registered
-needs the game's symbols.
+**It draws.** Nineteen frames, into a framebuffer it allocated itself:
+
+```
+vi: origin 0x0040E5C0 width 320, game framebuffer 0x8040E340, 19 display lists
+```
+
+Then it stops, and the window never shows any of them because all nineteen are
+the black ones a Super Mario 64 boot starts with. What it stops on is a
+busy-wait in its own code, immediately after it allocates the whole of the rest
+of its memory pool -- which is what a level editor does when it is about to
+load something. Every stubbed function has been ruled out of that path, the
+segment addresses are confirmed from three directions, the game sees its 8MB,
+and the pool pointer moves the way a working allocator's does. Whatever it is
+waiting for needs the game's symbols to name.
 
 ### Two register windows and a watchpoint
 

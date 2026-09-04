@@ -48,12 +48,18 @@ void audio_callback(void *userdata, uint8_t *out, int length) {
     }
 }
 
-void queue_samples(int16_t *samples, size_t frames) {
+/// ultramodern counts what it hands over in samples -- one 16-bit value, half
+/// of a stereo frame -- and asks for what is left in frames. Getting that the
+/// wrong way round puts twice as much audio in as comes out, so the buffer
+/// only ever grows, and a game that waits for its audio to drain before
+/// building the next frame waits forever. Mario Builder 64 stopped after
+/// nineteen of them.
+void queue_samples(int16_t *samples, size_t sample_count) {
     std::lock_guard<std::mutex> lock(stream_mutex);
     if (stream == nullptr) {
         return;
     }
-    SDL_AudioStreamPut(stream, samples, int(frames * kBytesPerFrame));
+    SDL_AudioStreamPut(stream, samples, int(sample_count * sizeof(int16_t)));
 }
 
 size_t frames_remaining() {

@@ -424,7 +424,8 @@ void poke_memory();
 /// snapshots a minute apart is what says which of its state is alive.
 ///
 /// `N64B_RAMDUMP=<path>[@<seconds>]` writes `<path>.NN.bin` every ten seconds,
-/// or every `<seconds>` if one is given -- an overlay a game frees is only
+/// or every `<seconds>` if one is given, fractions included -- an overlay a
+/// game frees is only
 /// there for as long as it is using it, so catching one means asking early.
 /// Each one is
 /// the eight megabytes the console has, in the order the runtime holds it: a
@@ -440,15 +441,15 @@ void n64b::set_watch_memory(uint8_t *rdram) {
         return;
     }
     static std::string path = spec;
-    unsigned every = 10;
+    unsigned every = 10000; // milliseconds
     const size_t at = path.find('@');
     if (at != std::string::npos) {
-        every = std::max(1u, unsigned(std::strtoul(path.c_str() + at + 1, nullptr, 0)));
+        every = std::max(1u, unsigned(std::strtod(path.c_str() + at + 1, nullptr) * 1000.0));
         path.resize(at);
     }
     static std::thread dumper([every] {
         for (unsigned i = 0; i < 99; i++) {
-            std::this_thread::sleep_for(std::chrono::seconds(every));
+            std::this_thread::sleep_for(std::chrono::milliseconds(every));
             if (watched_rdram == nullptr) {
                 continue;
             }
@@ -475,7 +476,8 @@ void n64b::set_watch_memory(uint8_t *rdram) {
 /// zero and want opposite fixes. Setting it and watching is the shortest way
 /// to tell them apart.
 ///
-/// `N64B_POKE=<address>=<value>[@<seconds>]`, ten seconds in by default, so
+/// `N64B_POKE=<address>=<value>[@<seconds>]` -- seconds may be fractional --
+/// ten seconds in by default, so
 /// that whatever the game does at startup has already happened. A
 /// comma-separated list is done in order, because one flag is rarely the whole
 /// of what a game checks.
@@ -487,17 +489,20 @@ void n64b::poke_memory() {
     struct Poke {
         unsigned address;
         unsigned value;
-        unsigned delay;
+        unsigned delay; // milliseconds
     };
     std::vector<Poke> pokes;
     for (const char *scan = spec; scan != nullptr && *scan != '\0';) {
         char *after = nullptr;
-        Poke poke{unsigned(std::strtoul(scan, &after, 0)), 0, 10};
+        Poke poke{unsigned(std::strtoul(scan, &after, 0)), 0, 10000};
         if (after != nullptr && *after == '=') {
             poke.value = unsigned(std::strtoul(after + 1, &after, 0));
         }
         if (after != nullptr && *after == '@') {
-            poke.delay = unsigned(std::strtoul(after + 1, &after, 0));
+            // Seconds, and fractions of one: the window between a game
+            // decompressing an overlay and reading something out of it is
+            // shorter than a second, and hitting it is the whole point.
+            poke.delay = unsigned(std::strtod(after + 1, &after) * 1000.0);
         }
         scan = (after != nullptr && *after == ',') ? after + 1 : nullptr;
         if (poke.address < 0x80000000u) {
@@ -514,7 +519,7 @@ void n64b::poke_memory() {
         unsigned waited = 0;
         for (const Poke &poke : pokes) {
             if (poke.delay > waited) {
-                std::this_thread::sleep_for(std::chrono::seconds(poke.delay - waited));
+                std::this_thread::sleep_for(std::chrono::milliseconds(poke.delay - waited));
                 waited = poke.delay;
             }
             if (watched_rdram == nullptr) {
@@ -522,8 +527,8 @@ void n64b::poke_memory() {
             }
             __builtin_memcpy(watched_rdram + (poke.address - 0x80000000u), &poke.value,
                              sizeof(poke.value));
-            std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, %u seconds in.\n", poke.value,
-                         poke.address, poke.delay);
+            std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, %.3f seconds in.\n", poke.value,
+                         poke.address, poke.delay / 1000.0);
             std::fflush(stderr);
         }
     });

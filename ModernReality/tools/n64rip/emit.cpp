@@ -234,18 +234,23 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
     // hardware that is not there, and reads as a game that runs and does not
     // do the thing.
     {
-        std::vector<std::string> known;
+        std::vector<std::pair<std::string, uint32_t>> known;
         for (const SectionInfo &section : analysis.sections) {
             for (const FunctionRange &function : section.functions) {
                 if (!function.known_as.empty() && function.name.empty()) {
-                    known.push_back(function.known_as);
+                    known.emplace_back(function.known_as, function.vram);
                 }
             }
         }
         std::sort(known.begin(), known.end());
         known.erase(std::unique(known.begin(), known.end()), known.end());
+        // The address as well as the name, because what somebody does with
+        // this is write a [[function]] line, and a [[function]] line is an
+        // address and a name.
         for (size_t i = 0; i < known.size(); i++) {
-            out << "    " << quote(known[i]) << (i + 1 < known.size() ? "," : "") << "\n";
+            out << "    { \"name\": " << quote(known[i].first) << ", \"vram\": "
+                << quote(hex(known[i].second)) << " }" << (i + 1 < known.size() ? "," : "")
+                << "\n";
         }
     }
     out << "  ],\n"

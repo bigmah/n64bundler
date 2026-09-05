@@ -42,7 +42,6 @@ unsigned watch_value(unsigned address) {
     return word;
 }
 
-
 /// Print the words at each `address:count` in `N64B_DUMP`.
 ///
 /// When a game has gone wrong the question is usually what a particular table
@@ -348,16 +347,32 @@ void dump() {
 /// accessed. Each distinct function is reported once: what is wanted is the
 /// set of places that touch a global, not a log of every access.
 extern "C" void n64b_watch(unsigned address, const char *where) {
-    // The first few accesses in order, with what the address holds when each
-    // one happens. A store shows its old value, so a pointer being written and
-    // then cleared reads as the value appearing and then going back to zero --
-    // which is the shape of the bug this exists to find.
+    // The first few accesses in order, and after that only the ones where what
+    // the address holds has changed since the last line. A store shows its old
+    // value, so a pointer being written and then cleared reads as the value
+    // appearing and then going back to zero -- which is the shape of the bug
+    // this exists to find.
+    //
+    // Reporting every access instead buries that: a global a game reads once a
+    // frame fills the cap with a hundred identical lines from the first second
+    // and never reaches the write that mattered. What is wanted is the first
+    // few, to see who set it up, and then every time it moved.
+    static size_t seen = 0;
     static size_t reported = 0;
-    if (reported++ >= 120) {
+    static unsigned last = 0;
+    static bool have_last = false;
+    const unsigned value = watch_value(address);
+    const bool early = seen++ < 20;
+    if (!early && have_last && value == last) {
         return;
     }
-    std::fprintf(stderr, "watch: %2zu  0x%08X = 0x%08X, in %s\n", reported, address,
-                 watch_value(address), where);
+    last = value;
+    have_last = true;
+    if (reported++ >= 400) {
+        return;
+    }
+    std::fprintf(stderr, "watch: %3zu  0x%08X = 0x%08X, in %s\n", reported, address, value,
+                 where);
 }
 
 /// Called from every recompiled function when the module was built with
@@ -437,6 +452,7 @@ void n64b::set_watch_memory(uint8_t *rdram) {
     });
     dumper.detach();
 }
+
 
 void n64b::install_trace(bool catch_signals) {
     std::atexit(dump);

@@ -954,18 +954,45 @@ clock and the pad all advance. Two snapshots of the console's memory ten
 seconds apart say which of its state is alive: the retrace counter at 60Hz, the
 frame counter at 20, a float at 0x80127638 counting real seconds.
 
-What is not alive is the player. `func_800C0A34`, which mode 3 asks every frame
-whether it may hand over to the pause menu, ends at
-`func_800F6438(0) -> func_800F4244(player) -> player->field_17C`, and that word
-is zero: the player is not in control. Every path that would set it --
-`func_800F44DC(player, 1)` -- ran twice in a run, on an object at 0x801E7A00,
-and the second call was the one that handed it back. The object the game asks
-about is a different one, at 0x801CF190.
+What is not alive is anything in the world. The chain, measured rather than
+guessed at, and every address here is one to check again:
 
-So the game is running its world with nobody in it, which is why the camera has
-nothing to follow. That is the next thing to find, and unlike everything above
-it there is no mechanism obviously missing: threads, timing, input, audio,
-rendering and the overlay system all do what they should.
+- **The player is not in control.** `func_800C0A34` is what mode 3 asks every
+  frame whether it may hand over to the pause menu, and it ends at
+  `func_800F6438(0) -> func_800F4244(player) -> player->field_17C`, which is
+  zero. Nothing else responds to the pad either: a run that presses all
+  fourteen buttons in turn produces a frame identical, byte for byte, to a run
+  that presses none.
+- **That is the game's own doing, and it is right.** `func_800F44DC(player, 1)`
+  gives control and ran once; `func_800F44DC(player, 0)` took it back one
+  overlay call later. The call that decided is a table lookup on the level id
+  -- the byte at 0x8012762C is 13, and levels 13 to 27 have a byte each in a
+  table an overlay carries. Level 13's bit says the player starts without
+  control, which is what a level that opens with a cutscene says.
+- **And there is nothing in the world to watch instead.** The game keeps its
+  actors in seven groups at 0x80132E80, walked twice a frame by
+  `func_800EB51C`. **Every one of the seven is null.** `func_800EB3D0`, which
+  is the only thing that fills one, is never called at all, though its caller
+  `func_800EB5E0` runs 1,806 times.
+- **Where that stops is one flag.** `func_800EB5E0` walks the objects the
+  camera's cell names -- one of them, entry 1 of the level's eleven -- and asks
+  `func_800EC800` whether to register it. That reads bit 0 of the halfword at
+  0x80132EE8, twenty-four bytes into a forty-eight byte descriptor whose other
+  fields are filled in and sensible: a back pointer to the level entry at
+  0x80193AE0, a behaviour function at 0x8008ED70, an id of 0x0D6E. The flag is
+  zero, and nothing writes it in thirty seconds of watching.
+
+So the game runs its opening cutscene level with an empty world: the terrain
+draws, the water moves, the music plays and loops on a forty-eight second
+cycle, and no actor is ever registered, so the camera has nothing to follow and
+the script has nothing to move. Twelve minutes and fifteen thousand display
+lists later the frame is the same.
+
+That is the next thing to find. What makes it a different kind of problem from
+every one above is that nothing in this runtime is obviously missing under it:
+threads, timing, input, audio, rendering, the heap the game compacts under
+itself, and the overlay system all do what they should, and the game's own code
+is making a decision rather than falling over.
 
 ## Roadmap
 
@@ -1003,13 +1030,14 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **Banjo-Tooie's player.** It boots, unpacks itself, draws its world and
-   plays its music, and runs its gameplay mode with nobody in it: the word the
-   game reads to ask whether the player is in control is zero, and the object
-   it asks about is not the one anything activated. Everything under that --
+3. **Banjo-Tooie's empty world.** It boots, unpacks itself, draws its world,
+   plays its music and runs indefinitely, with no actor registered in any of
+   its seven groups: the flag `func_800EC800` reads to decide whether to
+   register one is zero and nothing writes it. Everything under that --
    threads, timing, input, audio, rendering, the overlay system -- does what it
-   should, so this is the game's own state rather than a mechanism that is
-   missing, and finding it means following what spawns a player.
+   should. "Where Banjo-Tooie is now" above has the whole chain with addresses;
+   the next step is finding what sets that flag, which means following the
+   level's own setup rather than anything in this runtime.
 4. **Measuring an unpacked segment rather than being told it.** The two numbers
    a `[[unpacked]]` block carries were both found mechanically — the entry is
    what the runtime reported it could not find, and the extent is every word

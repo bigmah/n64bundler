@@ -293,12 +293,15 @@ measured in the analyser's own image, which for a compressed cartridge is
 thirty-eight kilobytes past the end of the ROM: nine hundred and ninety-two
 `nop`s and a microcode that stopped every frame.
 
-**And it runs.** The world, the water, the music, the pad, two thousand four
-hundred display lists in two minutes with nothing stalling. What it does not do
-is move: the game sits in its own gameplay mode with the player not in control,
-and the word it reads to decide that is zero. That is the next thing to find,
-and it is the first one on this list with no mechanism obviously missing under
-it.
+**And it runs.** The world, the water, the music, the pad — twelve minutes and
+fifteen thousand display lists with nothing stalling. What it does not do is
+move. The game runs its opening cutscene level with an empty world: it keeps
+its actors in seven groups and every one of them is null, because the flag it
+reads to decide whether to register an actor is zero and nothing ever writes
+it. [PLAN.md](PLAN.md) has the whole chain with the addresses. That is the next
+thing to find, and it is the first one on this list with no mechanism obviously
+missing under it — threads, timing, input, audio, rendering, the heap the game
+compacts under itself and the overlay system all do what they should.
 
 **So: a game that plays is not every game, and some ROMs will not boot at all.**
 Everything the analyser knows it learned from two cartridges, and the next one

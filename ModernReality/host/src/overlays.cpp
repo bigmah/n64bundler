@@ -248,6 +248,29 @@ recomp_func_t *n64b::recompile_at(uint8_t *rdram, uint32_t vram) {
     for (uint32_t at = vram; at < vram + length; at += 4) {
         words.push_back(__builtin_bswap32(console_word(rdram, at)));
     }
+
+    // The instructions themselves, for a function that is in no cartridge and
+    // so in no disassembly either. An overlay is freed and its address handed
+    // to something else, so by the time a memory image is taken the code that
+    // did the interesting thing is usually gone; catching it here is the only
+    // place it is certainly there. `N64B_OVERLAY_DUMP` is a comma-separated
+    // list of addresses to print when they are translated.
+    if (const char *wanted = std::getenv("N64B_OVERLAY_DUMP")) {
+        for (const char *scan = wanted; scan != nullptr && *scan != '\0';) {
+            char *after = nullptr;
+            const uint32_t asked = uint32_t(std::strtoul(scan, &after, 0));
+            scan = (after != nullptr && *after == ',') ? after + 1 : nullptr;
+            if (asked != vram) {
+                continue;
+            }
+            std::fprintf(stderr, "--- 0x%08X, %u bytes, as the game wrote it ---\n", vram,
+                         length);
+            for (size_t i = 0; i < words.size(); i++) {
+                std::fprintf(stderr, "  %08X: %08X\n", vram + unsigned(i) * 4, words[i]);
+            }
+            std::fflush(stderr);
+        }
+    }
     char name[32];
     std::snprintf(name, sizeof(name), "overlay_%08X", vram);
     context.functions.emplace_back(vram, vram - window_start, std::move(words), name, 0);

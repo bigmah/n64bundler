@@ -1006,6 +1006,17 @@ guessed at, and every address here is one to check again:
   `spawn_player` hand control straight back. So the deactivation is right and
   the question is only what should run the cutscene.
 
+- **And the camera is at the origin.** The camera object -- `word[0x8012D500]`,
+  which is 0x801CDBA0 -- holds a sensible rotation, cosines and sines of
+  twenty and twenty-seven degrees, and a position of nothing at all. Not one
+  word of it changes across a minute of snapshots. The world we are looking at
+  is whatever the level has at (0, 0, 0).
+- **Which is why one cell is active.** The game walks a grid of cells around
+  the camera every frame -- `func_800D3104` asks `func_800E9DCC` for the object
+  count of about three hundred of them a frame, 269,094 in the traced run --
+  and exactly one comes back non-zero. Its one object is the player. The level
+  has eleven; the other ten are somewhere the camera is not.
+
 So the game runs its opening cutscene level with an empty world: the terrain
 draws, the water moves, the music plays and loops on a forty-eight second
 cycle, and no actor is ever registered, so the camera has nothing to follow and

@@ -987,12 +987,24 @@ guessed at, and every address here is one to check again:
 - **And the same flag is the gate everywhere.** `func_8011458C`, which runs
   once a frame over the same list, checks the same two halfwords at +24 and
   +20 and gives up on the same entry.
-- **What would set them is only ever reached from an overlay.** `func_800EC360`
-  writes +20, `func_800EC5C0` writes +24, and neither runs. Climbing their
-  callers ends at `func_80107C2C`, which nothing in any recovered section calls
-  at all: it is reached from code the game decompresses, so the decision not to
-  enable this actor is being taken in an overlay. That is where the next
-  session starts, and `N64B_OVERLAY_DUMP` is how to read one.
+- **What would set them is only ever reached through a function pointer.**
+  `func_800EC360` writes +20, `func_800EC5C0` writes +24, and neither runs.
+  Climbing their callers ends at `func_80107C2C`, which nothing in any
+  recovered section calls: its address appears exactly once in the whole image,
+  as a word at 0x8011A3D8, in a small table of callbacks sitting in rodata
+  among a display list. Every other function in that table -- 0x800A6FF0,
+  0x80102EC0, 0x800A6DAC, 0x800A7088, 0x800A6EF4 -- has never run either. So
+  whatever indexes that table has not indexed it.
+- **The one actor the game did create is the player's own.** `func_800EBED4`,
+  which takes a descriptor out of the two-hundred slot pool, ran once in the
+  whole run, from `func_8008E618`, which is the player's own set-up. The pool's
+  allocation bitmap has one bit set. Nothing else in the level was ever made.
+- **And the level is a cutscene level, in the game's own words.** The table the
+  game consults is at 0x801EBA53 in an overlay, one byte per level from 13 to
+  27, and it reads as authored data: 0x45, then zeros, 0x10 at level 20, 0x80
+  at 22, 0x40 at 27. Level 13's bit 0 is set, and that bit is what makes
+  `spawn_player` hand control straight back. So the deactivation is right and
+  the question is only what should run the cutscene.
 
 So the game runs its opening cutscene level with an empty world: the terrain
 draws, the water moves, the music plays and loops on a forty-eight second

@@ -26,6 +26,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <algorithm>
 
 namespace {
 
@@ -421,7 +423,10 @@ void poke_memory();
 /// a trace or a backtrace can point at, and the difference between two
 /// snapshots a minute apart is what says which of its state is alive.
 ///
-/// `N64B_RAMDUMP=<path>` writes `<path>.NN.bin` every ten seconds. Each one is
+/// `N64B_RAMDUMP=<path>[@<seconds>]` writes `<path>.NN.bin` every ten seconds,
+/// or every `<seconds>` if one is given -- an overlay a game frees is only
+/// there for as long as it is using it, so catching one means asking early.
+/// Each one is
 /// the eight megabytes the console has, in the order the runtime holds it: a
 /// word is a word this machine can load, and a halfword or a byte is at its
 /// address exclusive-ored with two or three.
@@ -430,18 +435,25 @@ void poke_memory();
 /// the unpacked one is. Nothing writes one unless it is asked to.
 void n64b::set_watch_memory(uint8_t *rdram) {
     watched_rdram = rdram;
-    const char *path = std::getenv("N64B_RAMDUMP");
-    if (path == nullptr) {
+    const char *spec = std::getenv("N64B_RAMDUMP");
+    if (spec == nullptr) {
         return;
     }
-    static std::thread dumper([path] {
+    static std::string path = spec;
+    unsigned every = 10;
+    const size_t at = path.find('@');
+    if (at != std::string::npos) {
+        every = std::max(1u, unsigned(std::strtoul(path.c_str() + at + 1, nullptr, 0)));
+        path.resize(at);
+    }
+    static std::thread dumper([every] {
         for (unsigned i = 0; i < 99; i++) {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::this_thread::sleep_for(std::chrono::seconds(every));
             if (watched_rdram == nullptr) {
                 continue;
             }
             char named[512];
-            std::snprintf(named, sizeof(named), "%s.%02u.bin", path, i);
+            std::snprintf(named, sizeof(named), "%s.%02u.bin", path.c_str(), i);
             std::FILE *out = std::fopen(named, "wb");
             if (out == nullptr) {
                 continue;

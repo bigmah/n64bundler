@@ -994,6 +994,33 @@ threads, timing, input, audio, rendering, the heap the game compacts under
 itself, and the overlay system all do what they should, and the game's own code
 is making a decision rather than falling over.
 
+These were checked and are not it, so that the next attempt does not start
+here:
+
+- **Nothing is driving hardware that is not there.** Every function in the
+  image that builds an RCP register address was listed against how often it
+  ran, and the only two that run are reading the cartridge through its mapped
+  window at 0xB0000000, which the runtime provides. The rest never run.
+- **No libultra driver is missing.** The analyser now writes out which
+  signature matches it had to leave nameless -- the seventy-five in the info
+  file under `named_without_implementations` -- and they are the C library, the
+  audio library, the matrix helpers, and the internals of managers the runtime
+  owns outright. None of them is a driver the game reaches.
+- **The floating point mode is right.** The FR bit decides whether an odd
+  single-precision register is its own or the top half of the one below, and
+  getting it wrong would make every double in the game wrong while leaving the
+  simple things working; librecomp models it and the game sets it at boot.
+- **Timers deliver.** `osSetTimer` is the runtime's, its argument reading
+  matches the o32 layout for a 64-bit `OSTime`, and the timer thread posts.
+- **The live recompiler is not cutting functions short.** The overlay
+  translations that come out shortest are two instructions long because that
+  is what they are -- `jr $ra` over `addiu $v0, $zero, 395` -- and the
+  instructions the runtime translated match what a disassembly of the same
+  address says.
+- **Twelve minutes changes nothing.** The music loops on a forty-eight second
+  cycle and the fifteen-thousandth display list is the same picture as the
+  six-hundredth. There is no slow path being waited out.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is

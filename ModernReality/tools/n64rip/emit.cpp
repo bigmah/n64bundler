@@ -3,6 +3,8 @@
 
 #include "n64rip.hpp"
 
+#include <algorithm>
+
 #include <cstdio>
 #include <sstream>
 #include <vector>
@@ -225,6 +227,28 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
         << "  \"merged_boundaries\": " << analysis.report.merged_boundaries << ",\n"
         << "  \"names_without_implementations\": "
         << analysis.report.names_without_implementations << ",\n"
+        << "  \"named_without_implementations\": [\n";
+    // Which ones, not just how many. A count says a gap exists; the names say
+    // what is in it, and whether any of them is a driver -- a libultra
+    // function the runtime does not replace runs as translated MIPS over
+    // hardware that is not there, and reads as a game that runs and does not
+    // do the thing.
+    {
+        std::vector<std::string> known;
+        for (const SectionInfo &section : analysis.sections) {
+            for (const FunctionRange &function : section.functions) {
+                if (!function.known_as.empty() && function.name.empty()) {
+                    known.push_back(function.known_as);
+                }
+            }
+        }
+        std::sort(known.begin(), known.end());
+        known.erase(std::unique(known.begin(), known.end()), known.end());
+        for (size_t i = 0; i < known.size(); i++) {
+            out << "    " << quote(known[i]) << (i + 1 < known.size() ? "," : "") << "\n";
+        }
+    }
+    out << "  ],\n"
         << "  \"stubbed\": [\n";
     // Every address here is a function the runtime would have implemented if
     // something had named it, and a line somebody can put in a title record.

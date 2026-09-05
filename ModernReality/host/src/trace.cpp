@@ -21,6 +21,7 @@
 #include <csignal>
 #include <thread>
 #include <chrono>
+#include <vector>
 #include <initializer_list>
 #include <cstdio>
 #include <cstdlib>
@@ -409,6 +410,7 @@ extern "C" void n64b_trace(const char *name, const void *ctx) {
 namespace n64b {
 void install_trace(bool catch_signals);
 void set_watch_memory(uint8_t *rdram);
+void poke_memory();
 }
 
 /// Snapshots of the console's memory while the game runs.
@@ -451,6 +453,69 @@ void n64b::set_watch_memory(uint8_t *rdram) {
         }
     });
     dumper.detach();
+}
+
+/// Write one word into the console's memory while the game runs.
+///
+/// The question a static trace cannot answer is what a game would do if a
+/// value it worked out for itself were different -- whether a flag it never
+/// sets is a decision it made or a load that never arrived, which are the same
+/// zero and want opposite fixes. Setting it and watching is the shortest way
+/// to tell them apart.
+///
+/// `N64B_POKE=<address>=<value>[@<seconds>]`, ten seconds in by default, so
+/// that whatever the game does at startup has already happened. A
+/// comma-separated list is done in order, because one flag is rarely the whole
+/// of what a game checks.
+void n64b::poke_memory() {
+    const char *spec = std::getenv("N64B_POKE");
+    if (spec == nullptr) {
+        return;
+    }
+    struct Poke {
+        unsigned address;
+        unsigned value;
+        unsigned delay;
+    };
+    std::vector<Poke> pokes;
+    for (const char *scan = spec; scan != nullptr && *scan != '\0';) {
+        char *after = nullptr;
+        Poke poke{unsigned(std::strtoul(scan, &after, 0)), 0, 10};
+        if (after != nullptr && *after == '=') {
+            poke.value = unsigned(std::strtoul(after + 1, &after, 0));
+        }
+        if (after != nullptr && *after == '@') {
+            poke.delay = unsigned(std::strtoul(after + 1, &after, 0));
+        }
+        scan = (after != nullptr && *after == ',') ? after + 1 : nullptr;
+        if (poke.address < 0x80000000u) {
+            std::fprintf(stderr, "note: N64B_POKE wants a console address; 0x%08X is not one.\n",
+                         poke.address);
+            continue;
+        }
+        pokes.push_back(poke);
+    }
+    if (pokes.empty()) {
+        return;
+    }
+    std::thread poker([pokes] {
+        unsigned waited = 0;
+        for (const Poke &poke : pokes) {
+            if (poke.delay > waited) {
+                std::this_thread::sleep_for(std::chrono::seconds(poke.delay - waited));
+                waited = poke.delay;
+            }
+            if (watched_rdram == nullptr) {
+                continue;
+            }
+            __builtin_memcpy(watched_rdram + (poke.address - 0x80000000u), &poke.value,
+                             sizeof(poke.value));
+            std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, %u seconds in.\n", poke.value,
+                         poke.address, poke.delay);
+            std::fflush(stderr);
+        }
+    });
+    poker.detach();
 }
 
 

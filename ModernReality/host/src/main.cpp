@@ -168,6 +168,7 @@ void place_sections(uint8_t *rdram, recomp_context *ctx) {
     map_register_window(rdram);
     map_cartridge_window(rdram);
     n64b::set_watch_memory(rdram);
+    n64b::poke_memory();
     console_memory = rdram;
     if (loaded_module == nullptr) {
         return;

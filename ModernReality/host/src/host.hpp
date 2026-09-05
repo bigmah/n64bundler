@@ -100,6 +100,8 @@ void set_syscall_handler(uint32_t handler, uint32_t table, uint32_t table_size);
 /// Where the game's memory is, so a `--watch` build can print what the watched
 /// address holds rather than only who touched it.
 void set_watch_memory(uint8_t *rdram);
+/// Write one word into the console's memory a few seconds in, from N64B_POKE.
+void poke_memory();
 
 /// Opens whatever controllers are already plugged in. Hotplug is handled from
 /// the event pump.

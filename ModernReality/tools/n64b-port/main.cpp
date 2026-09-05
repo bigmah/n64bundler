@@ -529,10 +529,16 @@ void n64b_trace(const char *name, const void *ctx);
 #define TRACE_RETURN() ;
 
 #ifdef N64B_WATCH
-// A watch on one game address, for the question static analysis cannot answer:
-// which function touches this global? Every access in the recompiled code goes
-// through one of the MEM_ macros, so redefining them after recomp.h has had
-// its say is enough. Slow, and only ever on in a --watch build.
+// A watch on one game address or one range of them, for the question static
+// analysis cannot answer: which function touches this? Every access in the
+// recompiled code goes through one of the MEM_ macros, so redefining them
+// after recomp.h has had its say is enough. Slow, and only ever on in a
+// --watch build.
+//
+// A range is what a structure needs. "Nothing writes this flag" is only half an
+// answer when the flag is one field of forty-eight bytes the game fills in --
+// the useful question is which of its fields anything touches at all, and one
+// address at a time is one build each.
 //
 // All five widths, because a game keeps as much in halfwords and bytes as it
 // does in words -- a count, an id, a flag -- and a watch that only sees words
@@ -544,7 +550,8 @@ void n64b_trace(const char *name, const void *ctx);
 void n64b_watch(unsigned address, const char *where);
 
 static inline void n64b_watch_if(long long address, const char *where) {
-    if (((unsigned)address & ~3u) == ((unsigned)N64B_WATCH & ~3u)) {
+    if (((unsigned)address & ~3u) >= ((unsigned)N64B_WATCH & ~3u) &&
+        ((unsigned)address & ~3u) < (unsigned)N64B_WATCH_END) {
         n64b_watch((unsigned)address, where);
     }
 }
@@ -963,7 +970,19 @@ int build(Options options) {
 
     std::vector<std::string> base = compile_flags(options);
     if (!options.watch.empty()) {
-        base.push_back("-DN64B_WATCH=" + options.watch);
+        // `<address>` or `<address>:<bytes>`. One address is a range of four,
+        // because the match is on the word an access falls in.
+        const size_t colon = options.watch.find(':');
+        const std::string start = options.watch.substr(0, colon);
+        const unsigned long long from = std::strtoull(start.c_str(), nullptr, 0);
+        const unsigned long long span =
+            colon == std::string::npos
+                ? 4ull
+                : std::max(4ull, std::strtoull(options.watch.c_str() + colon + 1, nullptr, 0));
+        char end[32];
+        std::snprintf(end, sizeof(end), "0x%llX", (from & ~3ull) + span);
+        base.push_back("-DN64B_WATCH=" + start);
+        base.push_back("-DN64B_WATCH_END=" + std::string(end));
     }
     for (const std::string &include : options.includes) {
         base.push_back("-I" + include);
@@ -1059,7 +1078,7 @@ void usage() {
                  "usage: n64b-port build --analysis <dir> --rom <rom.z64> --out <module.dylib>\n"
                  "                       [--recomp <N64Recomp>] [--cc <clang>] [--include <dir>]\n"
                  "                       [--opt <-O2>] [--jobs <n>] [--force] [--keep-c]\n"
-                 "                       [--trace] [--watch <0xADDRESS>]\n"
+                 "                       [--trace] [--watch <0xADDRESS>[:<bytes>]]\n"
                  "                       [--porcelain]\n");
 }
 

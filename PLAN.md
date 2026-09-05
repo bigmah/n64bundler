@@ -805,30 +805,167 @@ tool reported nothing at all and looked like an answer. All five widths are
 watched now, and the match is on the word an access falls in rather than the
 exact address, so a byte inside a watched word is reported too.
 
+### A queue that ate itself
+
+The game drew its world and then, forty seconds in, stopped -- the game thread
+stopped submitting frames while every other thread carried on, no error
+anywhere, and the point it stopped at moved between runs. That reads like a
+wait nothing wakes, and it was not one. Sampling every thread while it was
+stopped found the game thread *spinning*, not blocked, inside
+`ultramodern::thread_queue_insert`:
+
+```
+2397 Thread: Game 6
+  func_800134C4  ->  osSendMesg  ->  do_send  ->  schedule_running_thread
+                 ->  ultramodern::thread_queue_insert  (+96, +108, ...)
+```
+
+A thread is a node in the queue it waits on. It can be in one queue at a time
+and in it once, and the walk that finds where to insert one stops at the first
+thread of lower priority -- which, for a thread that is already in that queue,
+is the thread itself. `toadd->next = toadd`. Every later walk of that queue
+runs forever.
+
+What queued a thread twice is Banjo-Tooie doing something ordinary. Its
+controller thread is stopped and started around each serial transfer, and
+`osStopThread` on a thread other than the caller was, in ultramodern,
+`assert(false)` -- which in a release build is nothing at all. So the stop left
+the thread on the message queue it was blocked on, and the start put it on the
+running queue as well, and the cycle closed the next time a message arrived for
+that queue. That is the forty seconds: the game had to reach an SI transfer
+first, and when it reached one varied.
+
+Both halves are libultra's own state machine now, and both matter:
+
+- **`osStopThread`** takes a thread out of whichever queue it is in and leaves
+  `queue` naming that queue, exactly as `__osDequeueThread` does. Its host
+  thread is already parked on its own semaphore and only a pop from a queue
+  ever signals that, so a thread in no queue is a thread that does not run.
+- **`osStartThread`** does nothing to a thread that is not stopped -- libultra's
+  is a switch on the state and a running thread falls out of it -- and a
+  stopped one goes back where it was: onto the message queue `queue` names if
+  it was waiting on one, since the message it was waiting for still has not
+  arrived, and onto the running queue otherwise.
+
+Underneath both was a third thing. `thread_queue_remove` never advanced its
+cursor -- it recomputed the head of the queue on every iteration and compared
+that -- so it could remove a thread that was first and nothing else, and on a
+queue of two or more where the thread was not first it looped forever. Nothing
+had called it with anything but a head until `osStopThread` did.
+
+`thread_queue_insert` now refuses a thread already in the queue and says so
+once. It is a cheap check -- these queues are one per message queue plus the
+running one, none longer than the game's nine threads -- and the alternative is
+a hang with no error in a function nowhere near whatever caused it.
+
+### Trigonometry that was stubbed for being two functions
+
+With the scheduler fixed the game ran indefinitely and its world still did not
+move. What was wrong is visible in the trace: the third, ninth and tenth
+busiest functions in the whole game were stubs.
+
+```
+      743150  func_800136D0
+      371575  func_800138BC
+      371889  func_8001395C
+```
+
+1,486,614 calls in a hundred and ten seconds, every one of them returning
+whatever happened to be in `$f0`. They are the game's sine and cosine.
+
+They were stubbed for a reason that was almost right. Hand-written assembly
+reaches one body from several entry points, and each entry point is a function:
+something calls it by name, and a `jal` names the first instruction of one. But
+the entries sit one after another in front of the body they share --
+
+```
+800136D0: lui at, 0x8004        <- one entry: sine of an angle in units
+800136D4: lwc1 f0, 0x16B0(at)
+800136D8: lui at, 0x8004
+800136DC: b    0x800136F8
+800136E0: lwc1 f2, 0x16B4(at)
+800136E4: lui at, 0x8004        <- another: sine of an angle in degrees
+...
+800136F8: mul.s f0, f0, f12     <- the body both of them run
+...
+80013720: jr ra
+```
+
+-- so putting a boundary at the second one, which a call from the segment the
+game unpacks second proves belongs there, takes the body away from the first,
+and what is left is five instructions that branch forward into somebody else's
+function. The analyser stubbed those, counted them, and said so.
+
+The right reading is two functions that overlap, each carrying its own copy of
+the tail, which is exactly what the recompiler makes of two entries with their
+own instruction lists. So a function whose branches escape is now walked again
+from its own first instruction, with nothing but its own branches deciding
+where it ends -- the same walk that recovered it, which already refuses to run
+past a terminator something branches over. If that lands past the boundary, the
+boundary was a second entry point rather than the end of anything. Three
+functions in Banjo-Tooie get their bodies back; Super Mario 64 and Mario
+Builder 64 have none, which is the answer for a game whose libultra is named.
+
+A region that genuinely has no division into functions -- libultra's exception
+preamble, where branches cross every entry in both directions -- is untouched,
+because a walk from inside one gives up at the first branch above its start.
+Two of those are left in Banjo-Tooie and they are correctly stubbed.
+
+### Sound, and the image an offset is into
+
+Banjo-Tooie's audio microcode is at 0x80037880 with its data at 0x80042010 --
+addresses the runtime prints out of the first task it cannot run. Neither is in
+the cartridge: they arrive in memory with the core segment the loader unpacks,
+so there is no rom offset to write down. A `[[microcode]]` block may now carry
+`vram` and `data_vram` instead, and the analyser finds the offset from the
+section the address falls in, which for a compressed cartridge is one of the
+spliced `[[unpacked]]` blocks. That is the same rule the rest of the record
+follows: addresses in console memory, never offsets into a file.
+
+The size the task carries is 0x1000 and the text cannot be that long. A
+libultra task's text lands 0x80 bytes into four kilobytes of instruction
+memory, so the most there can be is 0xF80 -- and 0xF80 is also what the block
+says about itself, because the command table in its data blob reaches 0x1FB0,
+which is 0xF30 past the text address.
+
+With that written down the microcode still did not run: it stopped early every
+frame, and the generated C was nine hundred and ninety-two `nop`s. n64b-port
+was handing RSPRecomp the player's cartridge and an offset measured in the
+analyser's own image -- the same file for every game until now, and for a
+cartridge that unpacks itself an offset thirty-eight kilobytes past the end of
+the ROM, which reads as zeros. It hands over the image the analyser's own
+configuration names.
+
+**Banjo-Tooie has its music.** Peaks of fifteen to twenty-two thousand out of
+thirty-two thousand, changing as the game moves through its opening.
+
 ### Where Banjo-Tooie is now
 
-**It draws.** This is the game's own world, read out of the console's memory
-exactly as the video interface would scan it:
+It boots, unpacks itself, draws its world, plays its music, polls its pad and
+runs indefinitely -- 2,400 display lists in two minutes with no stall, 434
+functions translated while it ran and none refused. What it does not do is
+move. The world renders, the water animates, the music plays and changes, and
+the camera never turns.
 
-```
-note: the game submitted its first display list, and RT64 recognises its microcode.
-note: wrote frame.ppm, 304 by 226, from the frame at 0x003BC6E0
-304x226, 1,022 colours
-```
+Where that stops is measured rather than guessed at. The game is in its own
+gameplay mode -- the mode word at 0x80127632 holds 3, and mode 4 is the pause
+menu, reached from 3 and returning to it -- and the frame counter, the elapsed
+clock and the pad all advance. Two snapshots of the console's memory ten
+seconds apart say which of its state is alive: the retrace counter at 60Hz, the
+frame counter at 20, a float at 0x80127638 counting real seconds.
 
-Textured geometry, a rock face, grass, a stone path. It runs its game loop for
-about forty seconds -- 781 display lists, 48,715 calls through its overlay
-system, 434 functions translated while it ran and none refused -- and then the
-game thread stops submitting frames while every other thread carries on. The
-video interface keeps scanning, the retrace thread keeps ticking, and nothing
-reports an error.
+What is not alive is the player. `func_800C0A34`, which mode 3 asks every frame
+whether it may hand over to the pause menu, ends at
+`func_800F6438(0) -> func_800F4244(player) -> player->field_17C`, and that word
+is zero: the player is not in control. Every path that would set it --
+`func_800F44DC(player, 1)` -- ran twice in a run, on an object at 0x801E7A00,
+and the second call was the one that handed it back. The object the game asks
+about is a different one, at 0x801CF190.
 
-That is the next thing to find, and it is a different kind of problem from any
-of the ones above: not a mechanism that is missing, but a wait that is not
-being woken. Where it stops is not fixed -- 358 display lists in one run, 781
-in another -- which points at timing rather than at a particular piece of data,
-and the two candidates worth trying first are the audio task the host completes
-without running, and the display processor's own interrupt.
+So the game is running its world with nobody in it, which is why the camera has
+nothing to follow. That is the next thing to find, and unlike everything above
+it there is no mechanism obviously missing: threads, timing, input, audio,
+rendering and the overlay system all do what they should.
 
 ## Roadmap
 
@@ -866,10 +1003,13 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **Banjo-Tooie's first frame.** It boots, unpacks itself and runs its
-   scheduler; it draws nothing. Its libultra is named, so this is not the
-   Super Mario 64 problem, and the next thing to find out is whether it ever
-   builds a display list at all.
+3. **Banjo-Tooie's player.** It boots, unpacks itself, draws its world and
+   plays its music, and runs its gameplay mode with nobody in it: the word the
+   game reads to ask whether the player is in control is zero, and the object
+   it asks about is not the one anything activated. Everything under that --
+   threads, timing, input, audio, rendering, the overlay system -- does what it
+   should, so this is the game's own state rather than a mechanism that is
+   missing, and finding it means following what spawns a player.
 4. **Measuring an unpacked segment rather than being told it.** The two numbers
    a `[[unpacked]]` block carries were both found mechanically — the entry is
    what the runtime reported it could not find, and the extent is every word

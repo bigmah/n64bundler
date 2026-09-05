@@ -222,24 +222,33 @@ bool load_title_record(const std::string &path, TitleRecord &out, std::string &e
             info.name = (*block)["name"].value_or(std::string{});
             const bool have_rom = read_address((*block)["rom"].node(), info.rom);
             const bool have_size = read_address((*block)["size"].node(), info.size);
-            if (!have_rom || !have_size) {
-                error = path + ": every [[microcode]] needs a rom and a size";
+            const bool have_vram = read_address((*block)["vram"].node(), info.vram);
+            if (!have_vram) {
+                info.vram = 0;
+            }
+            // A rom offset or a console address; either says where the block
+            // is. A cartridge that unpacks itself has no rom offset to give --
+            // its microcode arrives in memory with the rest of the segment it
+            // is in -- so the address is the general form and the offset is
+            // the one that stops being available first.
+            if ((!have_rom && !have_vram) || !have_size) {
+                error = path + ": every [[microcode]] needs a size and either a rom or a vram";
                 return false;
             }
             if (info.name.empty()) {
                 error = path + ": every [[microcode]] needs a name";
                 return false;
             }
-            if (!read_address((*block)["vram"].node(), info.vram)) {
-                info.vram = 0;
-            }
             uint32_t text_address = 0;
             if (read_address((*block)["text_address"].node(), text_address)) {
                 info.text_address = text_address;
             }
-            if (!read_address((*block)["data_rom"].node(), info.data_rom) ||
+            const bool have_data_rom = read_address((*block)["data_rom"].node(), info.data_rom);
+            const bool have_data_vram = read_address((*block)["data_vram"].node(), info.data_vram);
+            if ((!have_data_rom && !have_data_vram) ||
                 !read_address((*block)["data_size"].node(), info.data_size)) {
                 info.data_rom = 0;
+                info.data_vram = 0;
                 info.data_size = 0;
             }
             out.microcode.push_back(std::move(info));

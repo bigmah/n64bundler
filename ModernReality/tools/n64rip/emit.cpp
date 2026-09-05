@@ -213,6 +213,8 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
 
         << "  \"stubbed_functions\": " << analysis.report.stubbed_functions << ",\n"
         << "  \"stubbed_unstructured\": " << analysis.report.stubbed_unstructured << ",\n"
+        << "  \"extended_over_shared_tail\": " << analysis.report.extended_over_shared_tail
+        << ",\n"
         // The game's own syscall handler, and how many stubs reach it. Zero
         // and zero for a game that leaves the exception to libultra, which is
         // nearly all of them.

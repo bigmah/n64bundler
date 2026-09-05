@@ -19,9 +19,12 @@
 
 #include "host.hpp"
 #include <csignal>
+#include <thread>
+#include <chrono>
 #include <initializer_list>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -361,7 +364,24 @@ extern "C" void n64b_watch(unsigned address, const char *where) {
 /// tracing. Deliberately not thread-safe beyond the atomic counter: a torn
 /// read across the game's threads costs one wrong name in a log, and a lock
 /// here would change the timing of the thing being debugged.
+/// The arguments of one named function, every time it runs.
+///
+/// A trace says a function ran and a watch says an address was touched. What
+/// neither says is what a function was *asked* for, and that is the question
+/// as soon as a game has several objects of the same kind: the interesting
+/// thing about "the routine that puts a character in the player's hands ran
+/// twice" is which character, and whether the second call was handing it back.
+///
+/// `N64B_TRACE_ARGS=<name>` prints the four argument registers on every entry
+/// to that function. It needs a `--trace` module, like everything else here.
 extern "C" void n64b_trace(const char *name, const void *ctx) {
+    static const char *watched = std::getenv("N64B_TRACE_ARGS");
+    if (watched != nullptr && ctx != nullptr && std::strcmp(watched, name) == 0) {
+        const uint64_t *r = static_cast<const uint64_t *>(ctx);
+        std::fprintf(stderr, "call: %s(a0=%08X a1=%08X a2=%08X a3=%08X)\n", name,
+                     unsigned(r[4]), unsigned(r[5]), unsigned(r[6]), unsigned(r[7]));
+        std::fflush(stderr);
+    }
     names[next.fetch_add(1, std::memory_order_relaxed) % kEntries] = name;
     record(name, ctx);
     remember_per_thread(name);
@@ -376,8 +396,46 @@ void install_trace(bool catch_signals);
 void set_watch_memory(uint8_t *rdram);
 }
 
+/// Snapshots of the console's memory while the game runs.
+///
+/// The question a running game raises that none of the tools above answers is
+/// "what is it changing?" -- a game that draws a frame, plays its music and
+/// counts its frames while nothing in its world moves is not stopped anywhere
+/// a trace or a backtrace can point at, and the difference between two
+/// snapshots a minute apart is what says which of its state is alive.
+///
+/// `N64B_RAMDUMP=<path>` writes `<path>.NN.bin` every ten seconds. Each one is
+/// the eight megabytes the console has, in the order the runtime holds it: a
+/// word is a word this machine can load, and a halfword or a byte is at its
+/// address exclusive-ored with two or three.
+///
+/// The images are a derived work of the player's own cartridge in the same way
+/// the unpacked one is. Nothing writes one unless it is asked to.
 void n64b::set_watch_memory(uint8_t *rdram) {
     watched_rdram = rdram;
+    const char *path = std::getenv("N64B_RAMDUMP");
+    if (path == nullptr) {
+        return;
+    }
+    static std::thread dumper([path] {
+        for (unsigned i = 0; i < 99; i++) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            if (watched_rdram == nullptr) {
+                continue;
+            }
+            char named[512];
+            std::snprintf(named, sizeof(named), "%s.%02u.bin", path, i);
+            std::FILE *out = std::fopen(named, "wb");
+            if (out == nullptr) {
+                continue;
+            }
+            std::fwrite(watched_rdram, 1, 8u * 1024u * 1024u, out);
+            std::fclose(out);
+            std::fprintf(stderr, "note: wrote %s, the console's memory as it stands.\n", named);
+            std::fflush(stderr);
+        }
+    });
+    dumper.detach();
 }
 
 void n64b::install_trace(bool catch_signals) {

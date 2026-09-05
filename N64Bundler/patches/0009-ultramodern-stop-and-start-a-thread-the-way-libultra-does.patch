@@ -1,0 +1,228 @@
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 46aea61..493a1ba 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -48,6 +48,7 @@ constexpr PTR(PTR(OSThread)) running_queue = (PTR(PTR(OSThread)))-1;
+ void thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue, PTR(OSThread) toadd);
+ PTR(OSThread) thread_queue_pop(RDRAM_ARG PTR(PTR(OSThread)) queue);
+ bool thread_queue_remove(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_);
++bool thread_queue_contains(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_);
+ bool thread_queue_empty(RDRAM_ARG PTR(PTR(OSThread)) queue);
+ PTR(OSThread) thread_queue_peek(RDRAM_ARG PTR(PTR(OSThread)) queue);
+ 
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 9944a02..58c0d5b 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -102,6 +102,7 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+         while (MQ_IS_FULL(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
++            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
+     }
+@@ -140,6 +141,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+         while (MQ_IS_EMPTY(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
++            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
+     }
+diff --git a/ultramodern/src/threadqueue.cpp b/ultramodern/src/threadqueue.cpp
+index f9c0fa1..68857c5 100644
+--- a/ultramodern/src/threadqueue.cpp
++++ b/ultramodern/src/threadqueue.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include <cassert>
+ 
+ #include "ultramodern/ultramodern.hpp"
+@@ -11,10 +12,42 @@ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
+     return TO_PTR(PTR(OSThread), queue);
+ }
+ 
++bool ultramodern::thread_queue_contains(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_) {
++    PTR(OSThread) cur = *queue_to_ptr(PASS_RDRAM queue_);
++    while (cur != NULLPTR) {
++        if (cur == t_) {
++            return true;
++        }
++        cur = TO_PTR(OSThread, cur)->next;
++    }
++    return false;
++}
++
+ void ultramodern::thread_queue_insert(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) toadd_) {
+     PTR(OSThread)* cur = queue_to_ptr(PASS_RDRAM queue_);
+-    OSThread* toadd = TO_PTR(OSThread, toadd_); 
++    OSThread* toadd = TO_PTR(OSThread, toadd_);
+     debug_printf("[Thread Queue] Inserting thread %d into queue 0x%08X\n", toadd->id, (uintptr_t)queue_);
++
++    // A thread is a node in the list it is queued on, so it can only be in one
++    // list at a time and can only be in it once. Inserting one that is already
++    // there does not add a second entry -- it makes a cycle, because the walk
++    // below stops at the thread itself and then points it at itself -- and the
++    // next walk of that queue never ends. That is a hang with no error, in a
++    // function that is nowhere near whatever put the thread in twice, so it is
++    // worth the cost of looking: the queues here are one per message queue plus
++    // the running one, and none of them is longer than the game's thread count.
++    if (thread_queue_contains(PASS_RDRAM queue_, toadd_)) {
++        static bool reported = false;
++        if (!reported) {
++            reported = true;
++            std::fprintf(stderr,
++                         "note: thread %d was queued on 0x%08X twice, which would have hung the "
++                         "scheduler. The second one is ignored.\n",
++                         toadd->id, (unsigned)queue_);
++        }
++        return;
++    }
++
+     while (*cur && TO_PTR(OSThread, *cur)->priority > toadd->priority) {
+         cur = &TO_PTR(OSThread, *cur)->next;
+     }
+@@ -40,17 +73,31 @@ PTR(OSThread) ultramodern::thread_queue_pop(RDRAM_ARG PTR(PTR(OSThread)) queue_)
+     return ret;
+ }
+ 
++/// Take a thread out of a queue it is somewhere in the middle of.
++///
++/// The pointer walked is the address of each `next` field rather than the
++/// thread it holds, so that unlinking is one store whichever position the
++/// thread is in -- including the head, which for the running queue is not in
++/// the game's memory at all.
++///
++/// `queue` is deliberately left pointing at the queue the thread came out of.
++/// That is what libultra does and what `osStartThread` reads: a thread stopped
++/// while it was waiting on a message queue goes back onto that queue when it is
++/// started again, rather than becoming runnable.
+ bool ultramodern::thread_queue_remove(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_) {
++    if (queue_ == NULLPTR || t_ == NULLPTR) {
++        return false;
++    }
+     debug_printf("[Thread Queue] Removing thread %d from queue 0x%08X\n", TO_PTR(OSThread, t_)->id, (uintptr_t)queue_);
+ 
+-    PTR(PTR(OSThread)) cur = queue_;
+-    while (cur != NULLPTR) {
+-        PTR(OSThread)* cur_ptr = queue_to_ptr(PASS_RDRAM queue_);
+-        if (*cur_ptr == t_) {
+-            *cur_ptr = TO_PTR(OSThread, *cur_ptr)->next;
++    PTR(OSThread)* cur = queue_to_ptr(PASS_RDRAM queue_);
++    while (*cur != NULLPTR) {
++        if (*cur == t_) {
++            *cur = TO_PTR(OSThread, t_)->next;
++            TO_PTR(OSThread, t_)->next = NULLPTR;
+             return true;
+         }
+-        cur = TO_PTR(OSThread, *cur_ptr)->next;
++        cur = &TO_PTR(OSThread, *cur)->next;
+     }
+ 
+     return false;
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 6e3ed18..b51b598 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -235,17 +235,38 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
+     OSThread* t = TO_PTR(OSThread, t_);
+     debug_printf("[os] Start Thread %d\n", t->id);
+ 
+-    // If this is a game thread, insert the new thread into the running queue and then check the running queue.
+-    if (thread_self) {
+-        ultramodern::schedule_running_thread(PASS_RDRAM t_);
+-        ultramodern::check_running_queue(PASS_RDRAM1);
+-    }
+-    // Otherwise, immediately start the thread and terminate this one.
+-    else {
++    // Nothing is scheduling yet: this is the entrypoint starting the game's
++    // first thread, so it just runs.
++    if (!thread_self) {
+         t->state = OSThreadState::QUEUED;
+         resume_thread(t);
+         //throw ultramodern::thread_terminated{};
++        return;
+     }
++
++    // Starting a thread only does anything to one that is stopped. libultra's
++    // own osStartThread is a switch on the thread's state and a thread that is
++    // already runnable or running falls out of it having done nothing -- which
++    // matters here rather than being a detail, because a thread is a node in
++    // the queue it is waiting on, so queuing an already-queued one makes a
++    // cycle and the next walk of that queue never returns.
++    if (t->state == OSThreadState::STOPPED) {
++        // Where it goes is where it was. A thread stopped while it was waiting
++        // on a message queue is put back on that queue rather than made
++        // runnable, because the message it was waiting for still has not
++        // arrived; `queue` names that queue because stopping it left the name
++        // behind on purpose. A thread that was runnable, or one that has never
++        // run at all, becomes runnable.
++        if (t->queue == NULLPTR || t->queue == ultramodern::running_queue) {
++            ultramodern::schedule_running_thread(PASS_RDRAM t_);
++        }
++        else {
++            ultramodern::thread_queue_insert(PASS_RDRAM t->queue, t_);
++            t->state = OSThreadState::BLOCKED;
++        }
++    }
++
++    ultramodern::check_running_queue(PASS_RDRAM1);
+ }
+ 
+ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_func_t) entrypoint, PTR(void) arg, PTR(void) sp, OSPri pri) {
+@@ -274,13 +295,34 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+     if (t_ == NULLPTR) {
+         t_ = thread_self;
+     }
++    OSThread* t = TO_PTR(OSThread, t_);
++
+     // Check if the thread is stopping itself (arg is null or thread_self).
+     if (t_ == thread_self) {
++        // A running thread is in no queue, so stopping it is only marking it
++        // and handing the console to whoever is next. It comes back here when
++        // something calls osStartThread on it.
++        t->state = OSThreadState::STOPPED;
+         ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
++        return;
+     }
+-    else {
+-        assert(false);
++
++    if (t->state == OSThreadState::STOPPED) {
++        return;
+     }
++
++    // Stopping another thread is taking it out of the queue it is waiting in,
++    // and nothing else: its host thread is already parked on its own semaphore
++    // and only something that pops it out of a queue ever signals that, so a
++    // thread in no queue is a thread that does not run.
++    //
++    // `queue` deliberately keeps naming the queue it came out of. That is what
++    // osStartThread reads to put it back where it was, and it is what libultra
++    // does -- __osDequeueThread unlinks the thread and leaves the field alone.
++    if (t->queue != NULLPTR) {
++        ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
++    }
++    t->state = OSThreadState::STOPPED;
+ }
+ 
+ extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
+@@ -314,9 +356,14 @@ extern "C" void osSetThreadPri(RDRAM_ARG PTR(OSThread) t_, OSPri pri) {
+     if (t->priority != pri) {
+         t->priority = pri;
+ 
+-        if (t_ != ultramodern::this_thread() && t->state != OSThreadState::STOPPED) {
+-            ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+-            ultramodern::thread_queue_insert(PASS_RDRAM t->queue, t_);
++        // Requeued at the new priority, since a queue is kept in priority
++        // order. A thread that is in no queue -- running, or stopped -- has
++        // nothing to requeue, and `queue` is null for exactly those.
++        if (t_ != ultramodern::this_thread() && t->state != OSThreadState::STOPPED &&
++            t->queue != NULLPTR) {
++            PTR(PTR(OSThread)) queue = t->queue;
++            ultramodern::thread_queue_remove(PASS_RDRAM queue, t_);
++            ultramodern::thread_queue_insert(PASS_RDRAM queue, t_);
+         }
+ 
+         ultramodern::check_running_queue(PASS_RDRAM1);

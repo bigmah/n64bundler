@@ -135,6 +135,11 @@ void print_analysis(const n64rip::Analysis &analysis) {
         std::printf("%zu boundaries merged where a branch crossed them\n",
                     report.merged_boundaries);
     }
+    if (report.extended_over_shared_tail > 0) {
+        std::printf("%zu functions given back a body a later entry point had cut them off "
+                    "from\n",
+                    report.extended_over_shared_tail);
+    }
     if (report.stubbed_unstructured > 0) {
         std::printf("%zu functions stubbed: hand-written assembly that does not divide into "
                     "functions\n",

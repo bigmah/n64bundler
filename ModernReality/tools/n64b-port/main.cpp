@@ -122,6 +122,30 @@ bool write_file(const fs::path &path, const std::string &contents) {
 // exact shape is fixed a few hundred lines away in emit.cpp. Anything more
 // nested than that belongs in a real parser, and there is nothing more nested.
 
+/// The value of one `key = "..."` line in a TOML file the analyser wrote.
+///
+/// Same reasoning as json_string below: the file is written a few hundred lines
+/// away in emit.cpp, one key per line, and the only thing read out of it here
+/// is a path.
+std::string toml_string(const std::string &text, const std::string &key) {
+    for (size_t at = 0; at < text.size();) {
+        const size_t end = std::min(text.find('\n', at), text.size());
+        const size_t quote = text.find('"', at);
+        if (text.compare(at, key.size(), key) == 0 && quote != std::string::npos && quote < end) {
+            std::string out;
+            for (size_t i = quote + 1; i < end && text[i] != '"'; i++) {
+                if (text[i] == '\\' && i + 1 < end) {
+                    i++;
+                }
+                out.push_back(text[i]);
+            }
+            return out;
+        }
+        at = end + 1;
+    }
+    return {};
+}
+
 std::string json_string(const std::string &text, const std::string &key) {
     const std::string needle = "\"" + key + "\":";
     size_t at = text.find(needle);
@@ -843,6 +867,13 @@ int build(Options options) {
     // microcode is, so the analyser gets it from the title record; a game
     // without one recompiles exactly as before and is silent.
     std::vector<Microcode> microcode = json_microcode(info_json);
+    // Which image the analyser's offsets are into: whatever its own
+    // configuration hands the recompiler, which is a normalised or extended
+    // copy whenever the player's file is not what the recompiler can read.
+    std::string microcode_rom = toml_string(read_file(config), "rom_file_path");
+    if (microcode_rom.empty()) {
+        microcode_rom = fs::absolute(options.rom).string();
+    }
     for (auto block = microcode.begin(); block != microcode.end();) {
         const fs::path config = generated / ("rsp_" + block->name + ".toml");
         const fs::path source = generated / ("rsp_" + block->name + ".cpp");
@@ -850,7 +881,15 @@ int build(Options options) {
         toml << "# Written by n64b-port. One block of RSP microcode out of the cartridge.\n"
              // RSPRecomp resolves paths against the configuration's own
              // directory, so both of these have to be absolute.
-             << "rom_file_path = \"" << fs::absolute(options.rom).string() << "\"\n"
+             //
+             // The image is the one the analyser measured the offset in rather
+             // than the player's file, and for a cartridge that unpacks itself
+             // those are not the same: the microcode arrives in memory with
+             // the segment it is in, and the analyser spliced that segment
+             // onto the end of a copy. Its offset is past the end of the
+             // cartridge, and reading the cartridge there gives a microcode of
+             // nine hundred and ninety-two nops.
+             << "rom_file_path = \"" << microcode_rom << "\"\n"
              << "text_offset = 0x" << std::hex << std::uppercase << block->rom << "\n"
              << "text_size = 0x" << block->size << "\n"
              << "text_address = 0x" << block->text_address << std::dec << std::nouppercase << "\n"

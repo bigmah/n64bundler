@@ -638,6 +638,69 @@ bool branches_escape(const Rom &rom, const SectionInfo &section,
     return false;
 }
 
+/// Give a function back the body a boundary cut it off from.
+///
+/// Hand-written assembly reaches one body from several entry points, and each
+/// entry point is a function: something calls it by name, and a `jal` names the
+/// first instruction of a function. But the entries are laid out one after
+/// another in front of the body they share, so putting a boundary at the second
+/// one -- which a call proves belongs there -- takes the body away from the
+/// first, and what is left is a handful of instructions that branch forward
+/// into somebody else's function.
+///
+/// Banjo-Tooie's trigonometry is three of these, and it is not a corner:
+///
+///     800136D0: lui at, 0x8004        <- one entry: sine of an angle in units
+///     800136D4: lwc1 f0, 0x16B0(at)
+///     800136D8: lui at, 0x8004
+///     800136DC: beq  zero, zero, 0x800136F8
+///     800136E0: lwc1 f2, 0x16B4(at)
+///     800136E4: lui at, 0x8004        <- another: sine of an angle in degrees
+///     ...
+///     800136F8: mul.s f0, f0, f12     <- the body both of them run
+///     ...
+///     80013720: jr ra
+///
+/// The right reading is two functions that overlap, each with its own copy of
+/// the tail -- which is exactly what the recompiler makes of two entries with
+/// their own instruction lists, since it translates each function from the
+/// words it was given rather than from a shared range.
+///
+/// So the function is walked again from its own first instruction, with nothing
+/// but its own branches deciding where it ends -- the same walk that recovered
+/// it in the first place, which already refuses to run past a terminator that
+/// nothing branches over. If that lands past the boundary, the boundary was a
+/// second entry point rather than the end of anything, and the function keeps
+/// the body.
+///
+/// A region that genuinely does not divide into functions -- libultra's
+/// exception preamble, where branches go both ways across every entry -- is not
+/// touched, because a walk from inside one gives up the moment it sees a branch
+/// to before where it started.
+bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange &function);
+
+/// True when the function was extended and now holds itself together. The size
+/// is put back if it did not, so that a function this cannot help is stubbed
+/// exactly as it was before.
+bool settle_shared_tail(const Rom &rom, const SectionInfo &section,
+                        const std::set<uint32_t> &starts, uint32_t text_end,
+                        FunctionRange &function) {
+    const uint32_t was = function.size;
+    const Walk walk = walk_function(rom, section, function.vram);
+    if (!walk.valid || walk.end > text_end || walk.end <= function.vram + was) {
+        return false;
+    }
+    function.size = walk.end - function.vram;
+    // The tail is code this function had not been looked at with, so both
+    // questions are asked again over the whole of it.
+    if (branches_escape(rom, section, starts, text_end, function) ||
+        needs_stub(rom, section, function)) {
+        function.size = was;
+        return false;
+    }
+    return true;
+}
+
 /// The libultra accessors that are too short to fingerprint.
 ///
 /// `n64sig` will not make a signature out of a function shorter than six
@@ -1002,8 +1065,12 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
                 report.stubbed_by_name.push_back(function.known_as);
             }
         } else if (branches_escape(rom, section, final_starts, text_end_vram, function)) {
-            function.stub = true;
-            report.stubbed_unstructured++;
+            if (settle_shared_tail(rom, section, final_starts, text_end_vram, function)) {
+                report.extended_over_shared_tail++;
+            } else {
+                function.stub = true;
+                report.stubbed_unstructured++;
+            }
         }
     }
 
@@ -1089,8 +1156,12 @@ void restub_after_splitting(const Rom &rom, Analysis &analysis) {
                 continue;
             }
             if (branches_escape(rom, section, starts, text_end, function)) {
-                function.stub = true;
-                analysis.report.stubbed_unstructured++;
+                if (settle_shared_tail(rom, section, starts, text_end, function)) {
+                    analysis.report.extended_over_shared_tail++;
+                } else {
+                    function.stub = true;
+                    analysis.report.stubbed_unstructured++;
+                }
             }
         }
     }
@@ -1569,6 +1640,30 @@ std::vector<uint32_t> harvest_branch_targets(const Rom &rom, const MicrocodeInfo
     return targets;
 }
 
+/// Where in the file a console address is, for a record that gives one.
+///
+/// Two places can answer. IPL3 copies the first megabyte of the cartridge to
+/// the entry point, so anything in that copy is at a fixed distance from the
+/// boot offset; and a segment the game unpacked has been spliced onto the end
+/// of the image, where the record's own section table says it landed. Between
+/// them they cover every block a record can name, which is what lets a
+/// [[microcode]] carry addresses rather than offsets.
+bool rom_offset_of(const Rom &rom, const TitleRecord &record, uint32_t vram, uint32_t size,
+                   uint32_t &out) {
+    for (const SectionInfo &section : record.sections) {
+        if (vram >= section.vram && uint64_t(vram) + size <= uint64_t(section.vram) + section.size) {
+            out = section.rom + (vram - section.vram);
+            return true;
+        }
+    }
+    const uint64_t from_boot = uint64_t(vram) - rom.load_address;
+    if (vram >= rom.load_address && from_boot + size <= kBootCopySize) {
+        out = kBootRomOffset + uint32_t(from_boot);
+        return true;
+    }
+    return false;
+}
+
 /// Take the microcode a record names, and say whether it looks like microcode.
 void adopt_microcode(const Rom &rom, Analysis &analysis, const TitleRecord &record) {
     for (const MicrocodeInfo &recorded : record.microcode) {
@@ -1583,6 +1678,21 @@ void adopt_microcode(const Rom &rom, Analysis &analysis, const TitleRecord &reco
                 continue;
             }
             block.vram = rom.load_address + (block.rom - kBootRomOffset);
+        }
+        // Recorded by address rather than by offset, which is the only form
+        // available for a cartridge whose microcode arrives in memory.
+        if (block.rom == 0 && !rom_offset_of(rom, record, block.vram, block.size, block.rom)) {
+            analysis.report.notes.push_back(
+                "record: microcode \"" + block.name +
+                "\" is at an address no section covers, so nothing can be read from it");
+            continue;
+        }
+        if (block.data_rom == 0 && block.data_size != 0 &&
+            !rom_offset_of(rom, record, block.data_vram, block.data_size, block.data_rom)) {
+            analysis.report.notes.push_back(
+                "record: the data blob of microcode \"" + block.name +
+                "\" is at an address no section covers, so its command table cannot be read");
+            block.data_size = 0;
         }
         block.cop2_density = cop2_density(rom, block.rom, block.size);
         constexpr double kLooksLikeMicrocode = 0.10;

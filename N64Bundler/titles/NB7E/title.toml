@@ -179,3 +179,39 @@ size = 0xA5240
 stubs   = 0x80082540
 size    = 0x8450
 handler = 0x80081E74
+
+# The audio microcode.
+#
+# The signal processor runs the audio list, and it is the one microcode a game
+# submits that the runtime cannot do itself: graphics tasks go to the renderer,
+# and everything else has to be translated like the rest of the code. Without
+# it the game is silent -- it builds its audio list every frame, hands it over,
+# and the runtime completes the task without running it.
+#
+# Nothing in the image points here, and here is not in the image: this block
+# arrives with the core segment the loader unpacks, so it has an address and no
+# rom offset at all. That is why a [[microcode]] may be recorded by address --
+# the analyser finds the offset from the section the address falls in, which
+# for a compressed cartridge is one of the spliced [[unpacked]] blocks.
+#
+# The address came from the game itself. The runtime prints the task it cannot
+# run, and this is what it printed:
+#
+#   flags 0x0 ucode 0x80037880 (0x1000) ucode_data 0x80042010 (0x800)
+#
+# The size the task carries is not the size of the text. Instruction memory is
+# four kilobytes and a libultra task's text lands 0x80 bytes into it, so the
+# most there can be is 0xF80, and 0x1000 is the driver rounding up. 0xF80 is
+# also what the block itself says: the command table in the data blob -- the
+# sixteen halfword addresses the microcode dispatches through -- reaches
+# 0x1FB0, which is 0xF30 past the text address, so the text runs at least that
+# far and cannot run further than the end of instruction memory.
+#
+# The block reads as microcode by the check the analyser makes: better than a
+# quarter of it is coprocessor 2, which no code the R4300 runs ever is.
+[[microcode]]
+name      = "audio"
+vram      = 0x80037880
+size      = 0xF80
+data_vram = 0x80042010
+data_size = 0x800

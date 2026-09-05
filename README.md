@@ -22,9 +22,9 @@ at the same coverage and reaches its startup screen. Banjo-Tooie, the third,
 holds its game compressed and has to be run before it can be read at all — it
 now unpacks itself, hands over 9,732 functions with every internal call landing
 on a boundary, boots, runs its scheduler, dispatches through its own overlay
-system, has the runtime translate its overlays as it reaches them, and **draws
-its own world** — for about forty seconds, after which the game thread stops
-submitting frames. Everything around all three works: a ROM is analysed,
+system, has the runtime translate its overlays as it reaches them, **draws
+its own world** and **plays its music** — indefinitely, though with nobody in
+the world to move. Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what
 is still missing.
@@ -255,11 +255,50 @@ text with its own question, read the noise's first halfword as a size to
 allocate, and failed. The PIF's memory round-trips now, and the challenge is
 answered.
 
-**It draws.** Banjo-Tooie renders its own world — textured geometry, a rock
-face, grass, a stone path — and runs its game loop for about forty seconds:
-781 display lists, 48,715 calls through its overlay system, 434 functions
-translated while it ran and none refused. Then the game thread stops submitting
-frames while every other thread carries on, which is the next thing to find.
+**A queue that ate itself.** Past all that it drew its world and stopped forty
+seconds later — the game thread stopped submitting frames, every other thread
+carried on, and nothing reported an error. Sampled while it was stopped, the
+game thread was not waiting: it was spinning inside the runtime's own thread
+queue. A thread is a node in the queue it waits on, so a thread queued twice
+points at itself and the next walk of that queue never ends. Banjo-Tooie stops
+and starts its controller thread around each serial transfer, and stopping a
+thread other than the caller was an assertion the release build compiled away:
+the stop left it on the message queue it was blocked on and the start added it
+to the running queue as well. Both are libultra's own state machine now — stop
+takes a thread out of whichever queue it is in and leaves the name of it behind,
+start puts a stopped thread back where it was and does nothing to one that is
+already running — and underneath them, the runtime's "take a thread out of a
+queue" walked the head of the list over and over instead of walking the list.
+
+**And its trigonometry was stubbed for being two functions.** The three busiest
+functions in the whole game were doing nothing: 1,486,614 calls in a hundred and
+ten seconds, each returning whatever was in the return register. They are its
+sine and cosine, and they are hand-written assembly that reaches one body from
+several entry points laid out in front of it. A call from another segment proves
+the second entry point is a function, and cutting there takes the body away from
+the first — leaving five instructions that branch forward into somebody else's
+function, which the analyser stubs because it cannot be translated. The right
+reading is two functions that overlap, each with its own copy of the tail, so a
+function whose branches escape is walked again from its own first instruction
+and keeps whatever that walk says is its body. A region that genuinely does not
+divide into functions is untouched, because a walk from inside one gives up at
+the first branch above its start.
+
+**It has its music.** Banjo-Tooie's audio microcode is not in the cartridge —
+it arrives in memory with the segment the loader unpacks — so a `[[microcode]]`
+block may now name a block by console address and let the analyser find the
+offset in the section that address falls in. That was half of it. The other half
+was that the recompiler was being handed the player's cartridge and an offset
+measured in the analyser's own image, which for a compressed cartridge is
+thirty-eight kilobytes past the end of the ROM: nine hundred and ninety-two
+`nop`s and a microcode that stopped every frame.
+
+**And it runs.** The world, the water, the music, the pad, two thousand four
+hundred display lists in two minutes with nothing stalling. What it does not do
+is move: the game sits in its own gameplay mode with the player not in control,
+and the word it reads to decide that is zero. That is the next thing to find,
+and it is the first one on this list with no mechanism obviously missing under
+it.
 
 **So: a game that plays is not every game, and some ROMs will not boot at all.**
 Everything the analyser knows it learned from two cartridges, and the next one

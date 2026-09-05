@@ -194,6 +194,11 @@ struct AnalysisReport {
     /// body -- libultra's exception preamble is the one every game has -- and
     /// they do not divide into functions at all.
     size_t stubbed_unstructured = 0;
+    /// Functions given their body back after a boundary cut them off from it.
+    /// Each one is an entry point into a block that a later entry point also
+    /// starts in, so the two overlap and each carries its own copy of the
+    /// shared tail. Without this they would be counted above and stubbed.
+    size_t extended_over_shared_tail = 0;
     /// Two-instruction functions cut out of a game's syscall stub table. Zero
     /// for a game that has no such table, which is nearly all of them.
     size_t syscall_stubs = 0;
@@ -261,6 +266,9 @@ struct MicrocodeInfo {
     /// through: see harvest_branch_targets().
     uint32_t data_rom = 0;
     uint32_t data_size = 0;
+    /// Where the data blob lives in console memory, for the same reason `vram`
+    /// exists: a cartridge that unpacks itself has no rom offset to record.
+    uint32_t data_vram = 0;
     /// Addresses the text jumps to through a register. The recompiler has to
     /// know them: it turns an indirect jump into a switch over the labels it
     /// emitted, and a target with no label is a microcode that stops.

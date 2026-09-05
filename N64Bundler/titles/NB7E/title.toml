@@ -78,6 +78,26 @@ name = "osPiRawStartDma"
 vram = 0x8002F360
 name = "osSetTimer"
 
+# The save device's own question, which no signature answered.
+#
+# `func_80030170` is `osEepromProbe` instruction for instruction: it takes the
+# serial interface's access semaphore, calls `__osEepStatus` -- which a
+# signature did name, at 0x80032F84 -- and turns the two top bits of the type
+# it comes back with into libultra's answer, 1 for a four kilobit EEPROM and 2
+# for a sixteen kilobit one, or zero for neither.
+#
+# Unnamed it runs as recompiled MIPS, and what it drives is the PIF, which this
+# runtime models one level up: controllers are answered, a save device is not.
+# What it reads back is the block the game itself wrote, and the two bits that
+# fall out of that happen to say "sixteen kilobits" -- which is the right
+# answer, arrived at by luck. It matters more than a save does: the caller sets
+# a byte at 0x80079B93 when the probe says anything less, and that byte is what
+# the controller thread checks before it reads the pad at all. A different
+# accident there is a game that ignores the player.
+[[function]]
+vram = 0x80030170
+name = "osEepromProbe"
+
 # The game itself, which is in no part of the cartridge a reader can point at.
 #
 # With the driver above named, the loader runs: it pulls 0x189F0 bytes of

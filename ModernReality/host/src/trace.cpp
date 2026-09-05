@@ -490,11 +490,13 @@ void n64b::poke_memory() {
         unsigned address;
         unsigned value;
         unsigned delay; // milliseconds
+        unsigned until;  // wait for the address to hold this, if `waits`
+        bool waits;
     };
     std::vector<Poke> pokes;
     for (const char *scan = spec; scan != nullptr && *scan != '\0';) {
         char *after = nullptr;
-        Poke poke{unsigned(std::strtoul(scan, &after, 0)), 0, 10000};
+        Poke poke{unsigned(std::strtoul(scan, &after, 0)), 0, 10000, 0, false};
         if (after != nullptr && *after == '=') {
             poke.value = unsigned(std::strtoul(after + 1, &after, 0));
         }
@@ -503,6 +505,15 @@ void n64b::poke_memory() {
             // decompressing an overlay and reading something out of it is
             // shorter than a second, and hitting it is the whole point.
             poke.delay = unsigned(std::strtod(after + 1, &after) * 1000.0);
+        }
+        if (after != nullptr && *after == '?') {
+            // `?<value>` waits for a *second* address to hold that value
+            // rather than for a clock. A game that decides something in the
+            // first eight milliseconds cannot be caught by a timer, and the
+            // thing worth waiting for is usually the overlay arriving.
+            poke.until = unsigned(std::strtoul(after + 1, &after, 0));
+            poke.waits = true;
+            poke.delay = 0;
         }
         scan = (after != nullptr && *after == ',') ? after + 1 : nullptr;
         if (poke.address < 0x80000000u) {
@@ -518,7 +529,17 @@ void n64b::poke_memory() {
     std::thread poker([pokes] {
         unsigned waited = 0;
         for (const Poke &poke : pokes) {
-            if (poke.delay > waited) {
+            if (poke.waits) {
+                // Spin, because the window this exists to hit is measured in
+                // microseconds and a sleep would step over it.
+                for (unsigned spun = 0; spun < 2000000u; spun++) {
+                    if (watched_rdram != nullptr && watch_value(poke.address) == poke.until) {
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+            }
+            else if (poke.delay > waited) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(poke.delay - waited));
                 waited = poke.delay;
             }
@@ -527,8 +548,14 @@ void n64b::poke_memory() {
             }
             __builtin_memcpy(watched_rdram + (poke.address - 0x80000000u), &poke.value,
                              sizeof(poke.value));
-            std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, %.3f seconds in.\n", poke.value,
-                         poke.address, poke.delay / 1000.0);
+            if (poke.waits) {
+                std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, once it held 0x%08X.\n",
+                             poke.value, poke.address, poke.until);
+            }
+            else {
+                std::fprintf(stderr, "note: wrote 0x%08X over 0x%08X, %.3f seconds in.\n",
+                             poke.value, poke.address, poke.delay / 1000.0);
+            }
             std::fflush(stderr);
         }
     });

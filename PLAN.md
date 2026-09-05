@@ -947,9 +947,10 @@ polled, and no actor was ever registered in any of the seven groups the game
 keeps them in. Twelve minutes and fifteen thousand display lists later the
 frame was the same one.
 
-What found it was a second console. `mupen64plus` is a cycle-ish interpreter
-with a breakpoint API, and a hundred and fifty lines of frontend turn it into
-something this project did not have: a reference. No video, no audio, no input
+What found it was a second console. `mupen64plus` is an interpreter with a
+breakpoint API, and a hundred and fifty lines of frontend turn it into
+something this project did not have: a reference. Both programs are kept, in
+`ModernReality/tools/refconsole`. No video, no audio, no input
 -- the core runs the cartridge with its own stub plugins, and the frontend
 reads RDRAM out whenever it likes, breaks on an address, watches a word for
 writes, and keeps a ring of the last few thousand overlay calls. Two runs of

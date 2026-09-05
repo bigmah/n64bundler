@@ -201,7 +201,7 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | a game linked through the syscall exception | done — the record names the stub table and the handler, and the runtime stands in for the exception |
 | **overlays recompiled at runtime** | done — a function a game decompresses into memory it allocated is translated the first time it is jumped to |
 | the boot chip's challenge | done — the PIF's memory round-trips and a CIC-6105 challenge is answered |
-| **a third game that draws** | done — Banjo-Tooie renders its world; it stalls after about forty seconds |
+| **a third game that plays** | done — Banjo-Tooie runs its opening, reaches its file select and starts a game; see below |
 
 ### Where Super Mario 64 stands
 
@@ -939,115 +939,172 @@ configuration names.
 **Banjo-Tooie has its music.** Peaks of fifteen to twenty-two thousand out of
 thirty-two thousand, changing as the game moves through its opening.
 
+### The two words the boot ROM leaves
+
+Everything above got Banjo-Tooie to a world it drew and would not fill. The
+terrain was there, the water moved, the music played and looped, the pad was
+polled, and no actor was ever registered in any of the seven groups the game
+keeps them in. Twelve minutes and fifteen thousand display lists later the
+frame was the same one.
+
+What found it was a second console. `mupen64plus` is a cycle-ish interpreter
+with a breakpoint API, and a hundred and fifty lines of frontend turn it into
+something this project did not have: a reference. No video, no audio, no input
+-- the core runs the cartridge with its own stub plugins, and the frontend
+reads RDRAM out whenever it likes, breaks on an address, watches a word for
+writes, and keeps a ring of the last few thousand overlay calls. Two runs of
+the same game, one here and one there, and the question stops being "why does
+this not work" and becomes "where do these two stop agreeing", which is a
+question with an answer in it.
+
+They agree for a long way. Both load the same eighty-one overlays in the same
+order with the same arguments. Then the console loads twelve more and this
+runtime loads none, and the twelve are the level's actors.
+
+Walking back from there:
+
+- The overlay that populates the level's object grid calls `func_800BDCB8`,
+  and calls it only when `func_8001E204()` returns zero.
+- `func_8001E204` is three instructions. It returns the byte at 0x8007DB79.
+- One store writes that byte, at 0x8001DED4, and the eight instructions above
+  it read two words out of memory -- `0xA02FB1F4` and `0xA02FE1C0`, uncached --
+  exclusive-or them with `0xAD090010` and `0xAD170014`, and or the results
+  together. Zero means the words were what they should be.
+- On the console they are. Here they were zero, so the byte was 0x14, and from
+  then on the game refused to put a single object into the world.
+
+`0xAD090010` is `sw $t1, 0x10($t0)` and `0xAD170014` is `sw $s7, 0x14($t0)`.
+They are instructions, and the memory they are in is not the game's. Breaking
+on the game's first instruction and dumping all eight megabytes says where they
+came from: outside the megabyte IPL3 copies there are two hundred and twenty
+five non-zero words, and they are IPL3's own.
+
+The CIC-6105 boot chip's IPL3 -- Rare's, and only Rare's -- does three things
+this runtime did not. It leaves a word of ones at the bottom of each
+two-megabyte bank, from sizing memory. It copies bytes 0x554 to 0x888 of the
+cartridge to 0x80000004, under the address every game loads at. And it takes a
+0xC0-byte routine out of that copy and spreads it through the third megabyte
+eight bytes at a time, one piece every 4080 bytes, starting at 0x802FB1F0.
+Twenty-four pieces. The two words the game reads are the second word of the
+first piece and the first word of the fourth.
+
+Modelled that way -- the banks, the copy, twenty-four pieces read back out of
+the copy -- the runtime's memory matches the console's exactly: zero words
+differ across the whole eight megabytes at the moment the game starts. It is
+in librecomp's boot, in the boot ROM's own order, because on the console the
+megabyte lands on top of the copy and the libultra variables land on top of
+that. Everything written comes out of the player's own cartridge; what is
+hard-coded is where the boot ROM puts it, which is a fact about the console.
+
+And it still did not work, because of the other half.
+
+### Uncached memory is the same memory
+
+The game reads those words through `0xA02FB1F4`, not `0x802FB1F4`. KSEG1 is
+not a second eight megabytes; it is the same eight megabytes read past the
+cache, and every game that hands a structure to the RCP writes it through one
+window and reads it back through the other.
+
+librecomp maps KSEG0 and nothing else, so this project already had to do
+something about the rest: the register window at `0xA4000000` was backed with
+its own zeroed pages, so that a translated instruction storing to a hardware
+register would land somewhere rather than take the process down. That backing
+started at `0xA0000000`, and the bottom eight megabytes of it are not
+registers. They are RDRAM, and they were a second, empty copy of it.
+
+Which is the one kind of wrong that nothing reports. A write goes somewhere, a
+read comes back, the value is zero, and the game believes whatever zero means.
+Here it meant a copier was running.
+
+One `mach_vm_remap` makes the two windows the same pages. The eight megabytes
+the console has are aliased at `0xA0000000`; everything above them stays the
+zeroed pages the registers want.
+
+### A place the runtime can take the thread away
+
+With a world to be in, the game got as far as the end of its opening cutscene
+and stopped: every byte of the console's memory identical thirty seconds
+apart, the renderer still drawing the last frame it was given.
+
+Sampling the process says who is doing what. One game thread is in
+`func_800C2AB8`, which walks the game's sixty sound emitters, stops each one,
+and goes round again until none is still playing. Every other thread is
+blocked in `osRecvMesg`. And that is the whole of it: only one recompiled
+thread runs at a time and the runtime chooses which, but it only gets to
+choose when the running thread calls into it. A message from the video
+interface or the audio interface is queued by a runtime thread and delivered
+by the next game thread that asks the runtime for anything. A loop that only
+reads memory asks for nothing -- so the retrace never arrives, the audio
+thread never runs, the sound never finishes, and the loop goes round forever
+waiting for it.
+
+The recompiler already knew about the smallest form of this: a loop it can
+prove reads memory and does nothing else gets a `spin_wait` at the bottom.
+This loop calls functions, so nothing can be proved about it. What can be
+said instead is that a function entry is always a safe place to hand the
+thread over -- so every recompiled function begins with a check of one word,
+and when the runtime has set it, the thread delivers whatever the hardware
+has been holding and lets the scheduler pick again. That is what an interrupt
+does, in the order an interrupt does it. When there is nothing waiting the
+cost is a load and a branch that is never taken.
+
+Two things stop it, and both are cases where the console would not have
+interrupted either: a thread that has turned interrupts off in its status
+register, and the game's own exception handler, which the host marks while it
+is rewriting an overlay stub and assembling a thunk.
+
+### A second entry point, and a return through a register
+
+That got the game past the cutscene and into a jump to address zero.
+
+`func_800137C4` is a floating point helper -- multiply by a constant, hand the
+answer back -- and 0x800137D4 is the same helper with a different constant.
+Both end `move $a1, $ra`, a call, `jr $a1`: a return through a saved return
+address. Nothing in the image calls the second one, so the walk never found it
+and the sweep ran it into the first; the game reaches it through a pointer,
+the runtime translates it where it lands, and what it translates begins after
+the `move`. The register the `jr` returns through was never loaded.
+
+One line in the title record writes the boundary down, and the whole function
+goes into the module with its own first instruction. After that the game runs
+its attract mode all the way round -- Spiral Mountain, then five more worlds,
+each with its own camera move -- and comes back to the title screen without
+stopping.
+
 ### Where Banjo-Tooie is now
 
-It boots, unpacks itself, draws its world, plays its music, polls its pad and
-runs indefinitely -- 2,400 display lists in two minutes with no stall, 434
-functions translated while it ran and none refused. What it does not do is
-move. The world renders, the water animates, the music plays and changes, and
-the camera never turns.
+It plays.
 
-Where that stops is measured rather than guessed at. The game is in its own
-gameplay mode -- the mode word at 0x80127632 holds 3, and mode 4 is the pause
-menu, reached from 3 and returning to it -- and the frame counter, the elapsed
-clock and the pad all advance. Two snapshots of the console's memory ten
-seconds apart say which of its state is alive: the retrace counter at 60Hz, the
-frame counter at 20, a float at 0x80127638 counting real seconds.
+```
+boot -> unpack -> the intro cutscene -> the title screen -> the file select
+```
 
-What is not alive is anything in the world. The chain, measured rather than
-guessed at, and every address here is one to check again:
+The opening runs: the camera sweeps over Spiral Mountain at night, the river
+and the banks and the bridge draw, the text cards come up -- "TWO YEARS HAVE
+PASSED SINCE GRUNTILDA THE WITCH WAS DEFEATED BY BANJO AND KAZOOIE" -- Klungo
+speaks with his portrait and his subtitle, the transition irises out, and the
+game arrives at Banjo's house with three save slots on the wall and "PRESS (A)
+TO PLAY THE GAME. GAME 1: EMPTY" across the bottom. Start skips the cutscene
+from the first frame it is pressed. Left alone at the title the game loops back
+into the attract mode, which is what it is supposed to do.
 
-- **The player is not in control.** `func_800C0A34` is what mode 3 asks every
-  frame whether it may hand over to the pause menu, and it ends at
-  `func_800F6438(0) -> func_800F4244(player) -> player->field_17C`, which is
-  zero. Nothing else responds to the pad either: a run that presses all
-  fourteen buttons in turn produces a frame identical, byte for byte, to a run
-  that presses none.
-- **That is the game's own doing, and it is right.** `func_800F44DC(player, 1)`
-  gives control and ran once; `func_800F44DC(player, 0)` took it back one
-  overlay call later. The call that decided is a table lookup on the level id
-  -- the byte at 0x8012762C is 13, and levels 13 to 27 have a byte each in a
-  table an overlay carries. Level 13's bit says the player starts without
-  control, which is what a level that opens with a cutscene says.
-- **And there is nothing in the world to watch instead.** The game keeps its
-  actors in seven groups at 0x80132E80, walked twice a frame by
-  `func_800EB51C`. **Every one of the seven is null.** `func_800EB3D0`, which
-  is the only thing that fills one, is never called at all, though its caller
-  `func_800EB5E0` runs 1,806 times.
-- **Where that stops is one flag.** `func_800EB5E0` walks the objects the
-  camera's cell names -- one of them, entry 1 of the level's eleven -- and asks
-  `func_800EC800` whether to register it. That reads bit 0 of the halfword at
-  0x80132EE8, twenty-four bytes into a forty-eight byte descriptor whose other
-  fields are filled in and sensible: a back pointer to the level entry at
-  0x80193AE0, a behaviour function at 0x8008ED70, an id of 0x0D6E. Slot zero of
-  a two hundred entry pool at 0x80132ED0, allocated, zeroed and set up by
-  `func_800EBED4`, which fills +18, +19, +36 and +42 and leaves +20 and +24 to
-  whatever activates it. Both are zero, and nothing writes either in thirty
-  seconds of watching the whole descriptor.
-- **And the same flag is the gate everywhere.** `func_8011458C`, which runs
-  once a frame over the same list, checks the same two halfwords at +24 and
-  +20 and gives up on the same entry.
-- **What would set them is only ever reached through a function pointer.**
-  `func_800EC360` writes +20, `func_800EC5C0` writes +24, and neither runs.
-  Climbing their callers ends at `func_80107C2C`, which nothing in any
-  recovered section calls: its address appears exactly once in the whole image,
-  as a word at 0x8011A3D8, in a small table of callbacks sitting in rodata
-  among a display list. Every other function in that table -- 0x800A6FF0,
-  0x80102EC0, 0x800A6DAC, 0x800A7088, 0x800A6EF4 -- has never run either. So
-  whatever indexes that table has not indexed it.
-- **The one actor the game did create is the player's own.** `func_800EBED4`,
-  which takes a descriptor out of the two-hundred slot pool, ran once in the
-  whole run, from `func_8008E618`, which is the player's own set-up. The pool's
-  allocation bitmap has one bit set. Nothing else in the level was ever made.
-- **And the boot is a first boot, correctly.** The save file is blank, so the
-  first overlay the game dispatches into builds a fresh one -- `0x801913F0`
-  writes a new save structure at 0x8012B400 -- and another asks which map to
-  start in and answers 395, which is a constant in that overlay. The EEPROM
-  probe is `func_80030170`, which is `osEepromProbe` instruction for
-  instruction and which no signature named, so it runs as translated MIPS; it
-  happens to answer "sixteen kilobits", which is why the controller is read at
-  all. Naming it in the record would make that answer deliberate rather than
-  lucky.
-- **And the level is a cutscene level, in the game's own words.** The table the
-  game consults is at 0x801EBA53 in an overlay, one byte per level from 13 to
-  27, and it reads as authored data: 0x45, then zeros, 0x10 at level 20, 0x80
-  at 22, 0x40 at 27. Level 13's bit 0 is set, and that bit is what makes
-  `spawn_player` hand control straight back. So the deactivation is right and
-  the question is only what should run the cutscene.
+The measurements behind that, against the same cartridge on the reference
+console:
 
-- **And the camera is at the origin.** The camera object -- `word[0x8012D500]`,
-  which is 0x801CDBA0 -- holds a sensible rotation, cosines and sines of
-  twenty and twenty-seven degrees, and a position of nothing at all. Not one
-  word of it changes across a minute of snapshots. The world we are looking at
-  is whatever the level has at (0, 0, 0).
-- **Which is why one cell is active.** The game walks a grid of cells around
-  the camera every frame -- `func_800D3104` asks `func_800E9DCC` for the object
-  count of about three hundred of them a frame, 269,094 in the traced run --
-  and exactly one comes back non-zero. Its one object is the player. The level
-  has eleven; the other ten are somewhere the camera is not.
+- the tamper byte at 0x8007DB79 is 0, as it is there;
+- the actor groups at 0x80132E80 fill, and group 3 lands at 0x802179D0 --
+  the same address the console puts it at;
+- twenty-seven to thirty-one overlays stay resident through the cutscene
+  where before it fell to nine and stopped;
+- the camera object moves every frame, from (529, 6944, -1904) down through
+  (-1507, 1436, -1442) over the opening's first half-minute.
 
-So the game runs its opening cutscene level with an empty world: the terrain
-draws, the water moves, the music plays and loops on a forty-eight second
-cycle, and no actor is ever registered, so the camera has nothing to follow and
-the script has nothing to move. Twelve minutes and fifteen thousand display
-lists later the frame is the same.
+None of the things this took are Banjo-Tooie's. A cartridge with the same boot
+chip gets the same memory, and any game at all that reads back what it wrote
+through KSEG1 now reads what it wrote.
 
-Two experiments say the machinery under all of this works. Poking the player's
-control flag to 1 -- the thing level 13 denies -- fills one of the seven actor
-groups within a frame, so the registration path is sound and only its input is
-wrong. And poking the camera's position moves nothing, because the camera is
-never positioned by anything: not one word of the camera object changes in a
-minute, and the whole boot decision -- level 13, player deactivated -- is over
-within eight milliseconds of the game starting.
-
-That is the next thing to find. What makes it a different kind of problem from
-every one above is that nothing in this runtime is obviously missing under it:
-threads, timing, input, audio, rendering, the heap the game compacts under
-itself, and the overlay system all do what they should, and the game's own code
-is making a decision rather than falling over.
-
-These were checked and are not it, so that the next attempt does not start
-here:
+These were checked along the way and were not it, recorded so that the next
+game's version of this does not start here:
 
 - **Nothing is driving hardware that is not there.** Every function in the
   image that builds an RCP register address was listed against how often it
@@ -1109,14 +1166,14 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **Banjo-Tooie's empty world.** It boots, unpacks itself, draws its world,
-   plays its music and runs indefinitely, with no actor registered in any of
-   its seven groups: the flag `func_800EC800` reads to decide whether to
-   register one is zero and nothing writes it. Everything under that --
-   threads, timing, input, audio, rendering, the overlay system -- does what it
-   should. "Where Banjo-Tooie is now" above has the whole chain with addresses;
-   the next step is finding what sets that flag, which means following the
-   level's own setup rather than anything in this runtime.
+3. **Playing Banjo-Tooie further than its opening.** It boots, plays its
+   intro, reaches the file select, starts a game and plays the scene in
+   Banjo's house, and runs its attract mode round six worlds without
+   stopping. What nobody has done is play it for an hour: a game this size
+   has more of the runtime to reach than four minutes of it can, and the
+   three things the opening turned up -- the boot ROM's leftovers, uncached
+   memory, a thread that could not be interrupted -- were each invisible
+   until something asked for them.
 4. **Measuring an unpacked segment rather than being told it.** The two numbers
    a `[[unpacked]]` block carries were both found mechanically — the entry is
    what the runtime reported it could not find, and the extent is every word

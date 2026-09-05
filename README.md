@@ -14,17 +14,18 @@ and deliberately the same shape: a window over a headless pipeline, a library
 of games, per-game `.app` bundles that hold no game data, and a runtime tree
 that carries the forks.
 
-**One game plays.** Super Mario 64 recompiles from a bare cartridge dump and
+**Two games play.** Super Mario 64 recompiles from a bare cartridge dump and
 runs: its title screen, its file select, Peach's letter, the castle grounds,
 Mario under the control of a pad, its music and its sound effects, and a save
 file that survives quitting. Mario Builder 64, the second cartridge, recompiles
 at the same coverage and reaches its startup screen. Banjo-Tooie, the third,
 holds its game compressed and has to be run before it can be read at all — it
-now unpacks itself, hands over 9,732 functions with every internal call landing
-on a boundary, boots, runs its scheduler, dispatches through its own overlay
-system, has the runtime translate its overlays as it reaches them, **draws
-its own world** and **plays its music** — indefinitely, though with nobody in
-the world to move. Everything around all three works: a ROM is analysed,
+unpacks itself, hands over 9,732 functions with every internal call landing on
+a boundary, and then **plays**: the opening cutscene over Spiral Mountain with
+its text cards and its talking, the title screen, the file select in Banjo's
+house, and a new game from there into the scene indoors with the characters
+and the dialogue and the HUD. Left alone it runs its attract mode round six
+worlds and comes back. Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what
 is still missing.
@@ -293,19 +294,47 @@ measured in the analyser's own image, which for a compressed cartridge is
 thirty-eight kilobytes past the end of the ROM: nine hundred and ninety-two
 `nop`s and a microcode that stopped every frame.
 
-**And it runs.** The world, the water, the music, the pad — twelve minutes and
-fifteen thousand display lists with nothing stalling. What it does not do is
-move. The game runs its opening cutscene level with an empty world: it keeps
-its actors in seven groups and every one of them is null, because the flag it
-reads to decide whether to register an actor is zero and nothing ever writes
-it. [PLAN.md](PLAN.md) has the whole chain with the addresses. That is the next
-thing to find, and it is the first one on this list with no mechanism obviously
-missing under it — threads, timing, input, audio, rendering, the heap the game
-compacts under itself and the overlay system all do what they should.
+**And then it drew a world and would not put anything in it.** Seven actor
+groups, all null, for twelve minutes. What found the reason was a second
+console: `mupen64plus` with its debugger built in, plus a hundred and fifty
+lines of headless frontend, is a thing to disagree with — and two runs of the
+same cartridge turn "why does this not work" into "where do these two stop
+agreeing", which is a question with an answer in it.
 
-**So: a game that plays is not every game, and some ROMs will not boot at all.**
-Everything the analyser knows it learned from two cartridges, and the next one
-will teach it something else.
+They stop agreeing three times.
+
+**The boot ROM leaves things behind, and games look.** The CIC-6105 IPL3 —
+Rare's, and only Rare's — copies part of itself to the bottom of memory and
+spreads a routine out of that copy through the third megabyte. Banjo-Tooie
+reads two of those words, compares them against the instructions they should
+be, and when they differ sets a byte that from then on makes it refuse to put
+a single object into the level. Nothing says so; the world is simply empty
+forever. librecomp now leaves what the boot ROM leaves, out of the player's
+own cartridge, and the runtime's memory matches a console's word for word at
+the moment the game starts.
+
+**Uncached memory is the same memory.** It reads those words through
+`0xA02FB1F4`, and KSEG1 is not a second eight megabytes — it is the same eight
+megabytes read past the cache. The register window this host maps so that a
+store to a hardware register lands somewhere was covering the bottom of that
+window too, with zeroed pages of its own, so a game that wrote through one
+window and read back through the other read zero and believed it. One
+`mach_vm_remap` makes the two windows the same pages.
+
+**A thread has to be interruptible.** Between the cutscene and the title
+screen the game walks its sixty sound emitters and goes round again until none
+is playing. That loop asks the runtime for nothing, and the runtime can only
+schedule when it is asked — so the retrace never arrived, the audio thread
+never ran, the sound never finished, and every other thread sat blocked on a
+message in a queue nobody would drain. Every recompiled function now begins
+with a check of one word, and when the runtime sets it the thread delivers
+what the hardware has been holding and lets the scheduler pick again. That is
+what an interrupt does, and it is the first thing here that every game needs
+rather than one.
+
+**So: two games that play is not every game, and some ROMs will not boot at
+all.** Everything the analyser and the runtime know they learned from three
+cartridges, and the next one will teach them something else.
 
 ## Legal
 

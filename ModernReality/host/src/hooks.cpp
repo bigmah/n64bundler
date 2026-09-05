@@ -323,8 +323,21 @@ void n64b::set_syscall_handler(uint32_t handler, uint32_t table, uint32_t table_
 /// and the thunk -- so those are read instead. The recursion ends for the same
 /// reason it does on the console: the handler rewrites the stub before
 /// returning to it, so the second time through, the word is a jump.
+/// While this is non-zero the runtime will not take the thread away. The
+/// console's own version is that an exception handler runs with interrupts
+/// off, and the whole of what happens below is an exception handler.
+extern "C" thread_local unsigned recomp_no_preempt;
+
+namespace {
+struct HoldTheThread {
+    HoldTheThread() { recomp_no_preempt++; }
+    ~HoldTheThread() { recomp_no_preempt--; }
+};
+} // namespace
+
 extern "C" void recomp_syscall_handler(uint8_t *rdram, recomp_context *ctx,
                                        int32_t instruction_vram) {
+    const HoldTheThread held;
     if (syscall_handler == 0 || !is_a_stub(uint32_t(instruction_vram))) {
         static std::set<uint32_t> reported;
         if (reported.size() < 16 && reported.insert(uint32_t(instruction_vram)).second) {

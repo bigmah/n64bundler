@@ -1,0 +1,101 @@
+ultramodern: deliver the hardware's messages at a yield point
+
+A message from the video interface, the audio interface, the timer or the
+signal processor is queued by a runtime thread and delivered by whichever
+game thread next calls into the runtime. That is fine as long as one always
+does. A game that waits by reading memory never does, and then the message
+sits in the queue: the retrace never arrives, every other thread stays
+blocked in `osRecvMesg`, and the console stops with nothing wrong anywhere
+that a log would show.
+
+`recomp_preempt` is what the recompiled code calls at a function entry when
+this file has said there is something waiting. It does what the console's
+interrupt does and in the same order: deliver everything the hardware has
+been holding, then run whichever thread should be running now. Two things
+stop it -- a thread that has turned interrupts off, and the game's own
+exception handler, which the host marks while it is rewriting an overlay stub
+and assembling a thunk. Both are cases where the console would not have
+interrupted either.
+
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -1,9 +1,54 @@
+ #include "ultramodern/ultramodern.hpp"
+ 
++/// Set when a thread has been made runnable and nothing has looked since.
++///
++/// The recompiled code reads this at every function entry and calls
++/// `recomp_preempt` when it is set, which is the only way a thread that waits
++/// by reading memory rather than by receiving a message can ever be taken off
++/// the processor. See YIELD_POINT in recomp.h.
++extern "C" volatile unsigned recomp_preempt_wanted = 0;
++
++/// Non-zero while the thread is somewhere it must not be taken away from.
++///
++/// The console has one of these too: an exception handler runs with interrupts
++/// off. A game that reaches between its overlays through the syscall exception
++/// rewrites a stub and assembles a thunk in there, and a thread that saw half
++/// of that would jump into nothing.
++extern "C" thread_local unsigned recomp_no_preempt = 0;
++
++void dequeue_external_messages(RDRAM_ARG1);
++
++extern "C" void recomp_preempt(uint8_t *rdram, unsigned status_reg) {
++    // A thread that has turned interrupts off is in the middle of something it
++    // has said may not be interrupted. Leave the flag set and come back at the
++    // next entry after it turns them on again. A thread that has never written
++    // the status register has never said anything, and a zero there is that
++    // rather than a mask.
++    if (recomp_no_preempt != 0 || (status_reg != 0 && (status_reg & 1) == 0)) {
++        return;
++    }
++    recomp_preempt_wanted = 0;
++    // Only a thread the runtime knows about can be swapped away from. Anything
++    // else running recompiled code -- the boot path, before there are threads
++    // -- has nothing to hand over to.
++    if (ultramodern::this_thread() == NULLPTR) {
++        return;
++    }
++    // Everything the hardware has been waiting to deliver, and then whichever
++    // thread should be running now. This is the whole of what the console's
++    // interrupt does, and doing it here is what makes a loop that only reads
++    // memory into a loop something else can end.
++    dequeue_external_messages(PASS_RDRAM1);
++    ultramodern::check_running_queue(PASS_RDRAM1);
++}
++
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+     debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
+     thread_queue_insert(PASS_RDRAM running_queue, t_);
+     TO_PTR(OSThread, t_)->state = OSThreadState::QUEUED;
++    // Whoever is running now should look at the queue at its next chance, even
++    // if it is in a loop that never asks the runtime for anything.
++    recomp_preempt_wanted = 1;
+ }
+ 
+ void swap_to_thread(RDRAM_ARG OSThread *to) {
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -27,12 +27,22 @@
+     requeue_enabled.set(static_cast<int>(EventMessageSource::Dp), mqc.requeue_dp);
+ }
+ 
++// A message from the hardware is what an interrupt is, and the running thread
++// has to be made to look at it. See YIELD_POINT in recomp.h: a game that waits
++// by reading memory rather than by receiving a message never asks the runtime
++// anything, so without this the message sits in the queue and the console
++// stops -- the retrace never arrives, the audio thread never runs, the sound
++// the loop is waiting for never finishes.
++extern "C" volatile unsigned recomp_preempt_wanted;
++
+ void ultramodern::enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src) {
+     external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
++    recomp_preempt_wanted = 1;
+ }
+ 
+ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked) {
+     external_messages.enqueue({mq, msg, jam, requeue_if_blocked});
++    recomp_preempt_wanted = 1;
+ }
+ 
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);

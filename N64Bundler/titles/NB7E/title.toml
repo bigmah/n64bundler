@@ -235,3 +235,20 @@ vram      = 0x80037880
 size      = 0xF80
 data_vram = 0x80042010
 data_size = 0x800
+
+# A second entry point the analysis ran together with the first.
+#
+# `func_800137C4` is a floating point helper -- multiply the argument by a
+# constant and hand the answer back -- and 0x800137D4 is the same helper with a
+# different constant. Both end the same way: `move $a1, $ra`, a call, and then
+# `jr $a1`, which is a return through a saved return address rather than
+# through `$ra` itself.
+#
+# Nothing in the image calls the second one, so the walk never found it and the
+# sweep ran it into the first. The game reaches it through a pointer, the
+# runtime translates it on the spot, and what it translates begins after the
+# `move` -- so the register the `jr` returns through was never loaded, and the
+# game jumps to zero. Writing the boundary down puts the whole function in the
+# module, with its own first instruction.
+[[function]]
+vram = 0x800137D4

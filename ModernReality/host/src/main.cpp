@@ -21,6 +21,8 @@
 #include <cerrno>
 #include <filesystem>
 #include <sys/mman.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <string>
 #include <vector>
 
@@ -128,6 +130,38 @@ void map_register_window(uint8_t *rdram) {
                      "note: could not map the console's register window (%s). Games that reach "
                      "a hardware register directly will stop here.\n",
                      std::strerror(errno));
+        return;
+    }
+
+    // The bottom of that window is not registers. It is memory.
+    //
+    // KSEG1 is not a second eight megabytes; it is the same eight megabytes
+    // read past the cache. Every game that hands a structure to the RCP writes
+    // it through one window and something reads it through the other, so the
+    // two have to be the same pages -- and zeroed pages of their own are the
+    // one answer that is wrong in a way nothing reports. Banjo-Tooie reads two
+    // words the console's boot ROM left in memory, gets zero because it asked
+    // uncached, decides a copier is running, and from then on refuses to put a
+    // single object into the world. The game runs, draws and plays its music
+    // for as long as you like, and is empty.
+    //
+    // One remap makes the two windows the same memory. The eight megabytes are
+    // what the console has; everything above them in the window stays the
+    // zeroed pages the registers want.
+    mach_vm_address_t alias = mach_vm_address_t(rdram + kFirst);
+    vm_prot_t current = VM_PROT_READ | VM_PROT_WRITE;
+    vm_prot_t maximum = VM_PROT_READ | VM_PROT_WRITE;
+    constexpr size_t kRdram = 8u * 1024u * 1024u;
+    const kern_return_t aliased =
+        mach_vm_remap(mach_task_self(), &alias, kRdram, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                      mach_task_self(), mach_vm_address_t(rdram), /*copy=*/FALSE, &current,
+                      &maximum, VM_INHERIT_SHARE);
+    if (aliased != KERN_SUCCESS ||
+        mach_vm_protect(mach_task_self(), alias, kRdram, FALSE,
+                        VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+        std::fprintf(stderr,
+                     "note: uncached memory could not be made the same memory as cached. A game "
+                     "that reads back what it wrote through 0xA0000000 will read zero.\n");
     }
 }
 

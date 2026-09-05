@@ -1,0 +1,168 @@
+librecomp: leave what the boot ROM leaves
+
+IPL3 does more than copy the first megabyte of the cartridge and jump into
+it. It sizes memory as it goes, leaving a word of ones at the bottom of each
+bank, and the CIC-6105 chip's IPL3 -- which is Rare's, and only Rare's --
+copies its own second half to the bottom of RDRAM and then spreads
+twenty-four eight-byte pieces of one routine out of that copy through the
+third megabyte, one piece every 4080 bytes.
+
+Nothing needs any of it to run. It is there to be looked at, and Banjo-Tooie
+looks: eight instructions read two of the spread words, compare them against
+the instructions they are supposed to be, and set a byte when they differ.
+From then on the game refuses to put a single object into the level's grid.
+The terrain draws, the water moves, the music plays and loops, the pad is
+polled -- and the world is empty forever, with nothing anywhere saying why.
+
+Everything written here comes out of the player's own cartridge: the block is
+bytes 0x554 to 0x888 of the image and the spread is a piece of that block.
+What is hard-coded is where the boot ROM puts them, which is a fact about the
+console rather than about any game. It happens in the boot ROM's own order --
+before the megabyte, because the megabyte may land on top of it, and before
+the libultra variables, because on the console those land on top of this.
+
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -14,6 +14,7 @@
+ #include <cinttypes>
+ #include <cuchar>
+ #include <charconv>
++#include <span>
+ 
+ #include "recomp.h"
+ #include "librecomp/overlays.hpp"
+@@ -528,6 +529,96 @@
+ 
+     recomp_func_t* func = get_function(addr);
+     func(rdram, &ctx);
++}
++
++
++/// The CRC every N64 tool uses to tell one boot chip from another: the 4032
++/// bytes of IPL3 the cartridge carries after its header.
++static uint32_t boot_code_crc(std::span<const uint8_t> rom) {
++    static uint32_t table[256];
++    static bool built = false;
++    if (!built) {
++        for (uint32_t i = 0; i < 256; i++) {
++            uint32_t value = i;
++            for (int bit = 0; bit < 8; bit++) {
++                value = (value & 1) ? (0xEDB88320u ^ (value >> 1)) : (value >> 1);
++            }
++            table[i] = value;
++        }
++        built = true;
++    }
++    if (rom.size() < 0x1000) {
++        return 0;
++    }
++    uint32_t crc = 0xFFFFFFFFu;
++    for (size_t at = 0x40; at < 0x1000; at++) {
++        crc = table[(crc ^ rom[at]) & 0xFF] ^ (crc >> 8);
++    }
++    return crc ^ 0xFFFFFFFFu;
++}
++
++static uint32_t rom_word(std::span<const uint8_t> rom, size_t at) {
++    if (at + 4 > rom.size()) {
++        return 0;
++    }
++    return (uint32_t(rom[at]) << 24) | (uint32_t(rom[at + 1]) << 16) |
++           (uint32_t(rom[at + 2]) << 8) | uint32_t(rom[at + 3]);
++}
++
++/// What the console's boot ROM leaves in memory, besides the megabyte it copies.
++///
++/// IPL3 sizes RDRAM before it hands over, and it writes as it goes: a word of
++/// ones at the bottom of each two-megabyte bank. Then the CIC-6105 chip's
++/// IPL3 -- which is Rare's, and only Rare's -- does two more things. It copies
++/// its own second half to the bottom of memory, under the address every game
++/// loads at, and it spreads twenty-four eight-byte pieces of one routine out of
++/// that copy through the third megabyte, one piece every 4080 bytes.
++///
++/// None of it is needed to run. It is there to be looked at, and Banjo-Tooie
++/// looks: it reads two of the spread words, compares them against the
++/// instructions they should be, and if they differ sets a byte that from then
++/// on makes it refuse to put a single object into the level's grid. The terrain
++/// still draws and the music still plays; the world is simply empty, forever,
++/// and nothing anywhere says why. That is what eight instructions of
++/// copier-detection buys.
++///
++/// Everything written here comes out of the player's own cartridge. The block
++/// is bytes 0x554 to 0x888 of the image and the spread is a piece of the block;
++/// what is hard-coded is only where the boot ROM puts them, which is a fact
++/// about the console.
++static void leave_what_ipl3_leaves(uint8_t* rdram) {
++    // The banks IPL3 found. A console with less memory writes fewer of these,
++    // and this runtime always has the eight megabytes of an Expansion Pak.
++    for (int32_t bank = 0x80000000; bank < (int32_t)0x80800000; bank += 0x200000) {
++        MEM_W(0, bank) = 0xFFFFFFFFu;
++        MEM_W(4, bank) = 0xFFFFFFFFu;
++    }
++    MEM_W(0, (int32_t)0x800003F0) = 8 * 1024 * 1024;
++
++    std::span<const uint8_t> rom = recomp::get_rom();
++    constexpr uint32_t cic_6105_boot_crc = 0x98BC2C86u;
++    if (boot_code_crc(rom) != cic_6105_boot_crc) {
++        return;
++    }
++
++    // The copy. It starts one word in: the bank marker above is the first word
++    // of memory on the console too, because the sizing outlives the copy.
++    constexpr size_t block_rom = 0x554;
++    constexpr size_t block_size = 0x334;
++    for (size_t at = 0; at < block_size; at += 4) {
++        MEM_W(at, (int32_t)0x80000004) = rom_word(rom, block_rom + at);
++    }
++
++    // The spread, read back out of the copy, which is how the boot ROM does it.
++    constexpr int32_t spread_from = 0x800001E8;
++    constexpr int32_t spread_to = 0x802FB1F0;
++    constexpr int32_t spread_step = 0xFF0;
++    for (int piece = 0; piece < 24; piece++) {
++        const int32_t source = spread_from + piece * 8;
++        const int32_t destination = spread_to + piece * spread_step;
++        MEM_W(0, destination) = MEM_W(0, source);
++        MEM_W(4, destination) = MEM_W(4, source);
++    }
+ }
+ 
+ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -536,6 +627,12 @@
+ 
+     // Load overlays in the first 1MB
+     load_overlays(0x1000, (int32_t)entrypoint, 1024 * 1024);
++
++    // What the boot ROM leaves in memory, in the order it leaves it: before the
++    // megabyte, because the megabyte is allowed to land on top of it, and
++    // before the variables below, because on the console those land on top of
++    // this.
++    leave_what_ipl3_leaves(rdram);
+ 
+     // Initial 1MB DMA (rom address 0x1000 = physical address 0x10001000)
+     recomp::do_rom_read(rdram, entrypoint, 0x10001000, 0x100000);
+@@ -549,16 +646,21 @@
+ 
+     // Initialize variables normally set by IPL3
+     constexpr int32_t osTvType = 0x80000300;
+-    //constexpr int32_t osRomType = 0x80000304;
++    constexpr int32_t osRomType = 0x80000304;
+     constexpr int32_t osRomBase = 0x80000308;
+     constexpr int32_t osResetType = 0x8000030c;
+-    //constexpr int32_t osCicId = 0x80000310;
+-    //constexpr int32_t osVersion = 0x80000314;
++    constexpr int32_t osCicId = 0x80000310;
++    constexpr int32_t osVersion = 0x80000314;
+     constexpr int32_t osMemSize = 0x80000318;
+     //constexpr int32_t osAppNMIBuffer = 0x8000031c;
+     MEM_W(osTvType, 0) = 1; // NTSC
++    MEM_W(osRomType, 0) = 0; // cartridge
+     MEM_W(osRomBase, 0) = 0xB0000000u; // standard rom base
+     MEM_W(osResetType, 0) = 0; // cold reset
++    // The boot chip, which IPL3 writes here and a game may read back. The
++    // copy above leaves an instruction in this word when it is not written.
++    MEM_W(osCicId, 0) = (boot_code_crc(recomp::get_rom()) == 0x98BC2C86u) ? 6105 : 6102;
++    MEM_W(osVersion, 0) = 0;
+     MEM_W(osMemSize, 0) = 8 * 1024 * 1024; // 8MB
+ }
+ 

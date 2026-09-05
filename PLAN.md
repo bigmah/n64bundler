@@ -999,6 +999,15 @@ guessed at, and every address here is one to check again:
   which takes a descriptor out of the two-hundred slot pool, ran once in the
   whole run, from `func_8008E618`, which is the player's own set-up. The pool's
   allocation bitmap has one bit set. Nothing else in the level was ever made.
+- **And the boot is a first boot, correctly.** The save file is blank, so the
+  first overlay the game dispatches into builds a fresh one -- `0x801913F0`
+  writes a new save structure at 0x8012B400 -- and another asks which map to
+  start in and answers 395, which is a constant in that overlay. The EEPROM
+  probe is `func_80030170`, which is `osEepromProbe` instruction for
+  instruction and which no signature named, so it runs as translated MIPS; it
+  happens to answer "sixteen kilobits", which is why the controller is read at
+  all. Naming it in the record would make that answer deliberate rather than
+  lucky.
 - **And the level is a cutscene level, in the game's own words.** The table the
   game consults is at 0x801EBA53 in an overlay, one byte per level from 13 to
   27, and it reads as authored data: 0x45, then zeros, 0x10 at level 20, 0x80
@@ -1022,6 +1031,14 @@ draws, the water moves, the music plays and loops on a forty-eight second
 cycle, and no actor is ever registered, so the camera has nothing to follow and
 the script has nothing to move. Twelve minutes and fifteen thousand display
 lists later the frame is the same.
+
+Two experiments say the machinery under all of this works. Poking the player's
+control flag to 1 -- the thing level 13 denies -- fills one of the seven actor
+groups within a frame, so the registration path is sound and only its input is
+wrong. And poking the camera's position moves nothing, because the camera is
+never positioned by anything: not one word of the camera object changes in a
+minute, and the whole boot decision -- level 13, player deactivated -- is over
+within eight milliseconds of the game starting.
 
 That is the next thing to find. What makes it a different kind of problem from
 every one above is that nothing in this runtime is obviously missing under it:

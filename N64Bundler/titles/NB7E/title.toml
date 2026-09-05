@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Banjo-Tooie (USA) - what n64rip cannot recover from the image on its own.
+#
+# Measurements of a cartridge: addresses, sizes and a hash. No game data, the
+# same rule the ROMs themselves follow.
+#
+# This cartridge is a different shape from the other two. Super Mario 64 and
+# Mario Builder 64 are games with their code in the image; the analyser finds
+# most of it and a record says where the rest landed. Banjo-Tooie is a
+# sixteen-kilobyte loader followed by thirty-two megabytes of compressed data.
+# There is no second segment to write down, because until the loader has run
+# there is no code anywhere but the loader.
+#
+# So what a record can do here is get the loader working, and the loader does
+# the rest. That takes one name.
+
+[title]
+game_id = "NB7E"
+name = "Banjo-Tooie"
+rom_hash = "00f70de5f2d70ea2"
+notes = [
+    "the game is compressed; the sixteen-kilobyte loader at the entry point unpacks it at runtime, so nothing past it can be recovered from the image",
+]
+
+# The loader's own parallel interface driver.
+#
+# `func_80000450` is the whole of the boot sequence, and its second call asks
+# for 0x189F0 bytes from rom 0x01E29B60 into 0x80200000 -- the compressed
+# image. The call goes to 0x80001A40, and 0x80001A40 is `osPiRawStartDma`:
+#
+#   - it spins on `0xA4600010 & 3`, which is PI_STATUS's two busy bits;
+#   - it calls `osVirtualToPhysical` on its third argument and writes the
+#     answer to PI_DRAM_ADDR;
+#   - it ors its second argument with a word held at 0x80000308 -- the
+#     cartridge base, 0x10000000 -- masks to 0x1FFFFFFF and writes that to
+#     PI_CART_ADDR;
+#   - and then it branches on its first argument: 0 writes size-1 to
+#     PI_WR_LEN and 1 writes it to PI_RD_LEN, which is OS_READ and OS_WRITE
+#     in that order, and anything else returns -1.
+#
+# That is the function, instruction for instruction, with one difference: the
+# cartridge base comes from the global rather than from the caller passing a
+# KSEG1 address. The runtime's implementation ors the base in either way, so
+# both conventions arrive at the same physical address.
+#
+# Unnamed it runs as recompiled MIPS, and the registers it writes are memory
+# the host backs with zeroed pages -- so the request is parked there, nothing
+# is transferred, and the decompressor that runs next reads a buffer of zeroes
+# and walks its source pointer to 0x00000001. That fault, a quarter of a second
+# in, is the whole of what a player sees: a window that opens and closes.
+[[function]]
+vram = 0x80001A40
+name = "osPiRawStartDma"
+
+# The timer, which the runtime owns and the signature database did not name.
+#
+# `func_8002F360` fills a six-field structure and tail calls `func_80033EF8`,
+# and both halves are libultra's `osSetTimer` instruction for instruction:
+#
+#   - it writes zero to the first two words, which are the list pointers a
+#     timer is inserted with;
+#   - it writes the fifth and sixth arguments, which arrive on the stack, to
+#     offsets 8 and 12 -- `interval`, a 64-bit value in two registers;
+#   - it writes `a2` and `a3` to offsets 16 and 20 unless both are zero, in
+#     which case it writes the interval there instead. That is `value`, and
+#     "a countdown of zero means one interval" is libultra's own behaviour;
+#   - it writes the two remaining stack arguments to 24 and 28, which are the
+#     message queue and the message;
+#   - and then it calls `__osInsertTimer`, which walks the list at
+#     0x80041550 and is the function that faults.
+#
+# It faults because the list is the game's and the threads are the runtime's:
+# nothing here ever ran the libultra that would have built it, so the head
+# pointer is zero and the first insertion dereferences it. Named, the runtime's
+# own timer stands in and the list is never touched.
+[[function]]
+vram = 0x8002F360
+name = "osSetTimer"
+
+# The game itself, which is in no part of the cartridge a reader can point at.
+#
+# With the driver above named, the loader runs: it pulls 0x189F0 bytes of
+# compressed data from rom 0x01E29B60 into 0x80200000, unpacks two blocks out
+# of it, checksums both, and calls 0x80012030. That last call is where the
+# first run ends -- there is no recompiled function at 0x80012030, because
+# until the loader ran there was no code there at all.
+#
+# `n64b-run --unpack` stops at exactly that point and writes console memory
+# out, and these two numbers say which part of it is the game.
+#
+# How they were found, so they can be checked:
+#
+#   - the entry is what the runtime reported it could not find, and it is also
+#     what the loader builds in `$t9` at 0x80000518: `lui 0x8001` then
+#     `addiu 0x2030`.
+#   - the extent is every word of memory that differs from what IPL3 put
+#     there. IPL3 copies the first megabyte of the cartridge to 0x80000400
+#     verbatim, so anything still equal to the cartridge is a copy and
+#     anything not is something the loader wrote. Three ranges differ:
+#     0x80004000-0x80008000, which is the loader's own workspace,
+#     0x80100000-0x80101000, and 0x80012000-0x80043000, which is this.
+#   - the split inside it between code and data is at about 0x8003D000, where
+#     `jr $ra` and stack-frame prologues stop and never resume. The section
+#     runs to the end of what was written and the analyser narrows it to the
+#     code, which is what it does for every other section.
+#
+# The first 0x30 bytes are not code: the loader writes four checksum words to
+# 0x80012000 and the two blocks' cartridge bounds after them, and the entry is
+# the first instruction past that.
+[[unpacked]]
+name = "core"
+vram = 0x80012030
+size = 0x30FD0
+
+# The game's main segment, which the core loads next.
+#
+# With the core recompiled the game gets further: it starts its own threads,
+# runs `func_800124EC`, and calls 0x801168F0 -- which is again not there,
+# because the core's job is to load this. Running `--unpack` a second time,
+# with the core in the module, catches it: the image that run writes holds
+# everything the first one did plus 0x800815C0 upwards, and the core's own
+# calls out of itself land at 0x800815CC and 0x8008160C, which is this
+# segment's second and third function.
+#
+# 0x800815C0 is the first non-zero word above the heap the core zeroes, and
+# 0x80117C4C is the last stack-frame prologue or `jr $ra` in it. The analyser
+# narrows the section to the code, as it does everywhere else.
+#
+# The size, though, is not the size of the code. This segment has a hole in it:
+# code and data to 0x8011BB78, nothing until 0x80123000, and then rodata again
+# to 0x8012673C. The rodata is where its jump tables live -- 0x80124A9C holds
+# five addresses inside `func_8008ADE4`, and there are dozens more -- and the
+# recompiler finds a jump table by assuming it sits at the same distance from
+# the start of the rom as it does from the start of the segment. That is true
+# only if the whole segment, hole and all, is one run of bytes. So the size
+# runs to the end of the rodata rather than to the end of the code, and the
+# hole is carried along with it.
+[[unpacked]]
+name = "main"
+vram = 0x800815C0
+size = 0xA5240
+
+# How the game calls between its overlays: through the CPU's syscall exception.
+#
+# Thirty-two megabytes of game do not fit in eight megabytes of console, so
+# Banjo-Tooie holds its code in overlays and loads them as it needs them. A
+# call from one overlay into another cannot be a `jal`, because the callee may
+# not be in memory -- so every one of them goes to a two-instruction stub in
+# one table, and the table is the whole of the game's linkage:
+#
+#     800893C8: syscall 0x309          the function, encoded in the code field
+#     800893CC: addi    $t0, $zero, 0  which of that overlay's entry points
+#
+# What runs then is the game's own exception handler, and this is where the two
+# numbers came from:
+#
+#   - `stubs` is the base the handler subtracts to get an index. It is a
+#     constant inside the handler rather than a guess: at 0x80081EB4 it builds
+#     `lui $t1, 0x8008; addiu $t1, $t1, 0x2540` and subtracts it from the
+#     trapping address. The table starts exactly there, right after a `jr $ra`
+#     and two words of padding at 0x80082538.
+#   - `size` runs to 0x8008A990, where the stubs stop and a stack-frame
+#     prologue begins. 4,234 stubs, every one of them a `syscall` -- which
+#     nothing a compiler emits ever is, so the range checks itself.
+#   - `handler` is what libultra's exception preamble hands a Sys exception to.
+#     At 0x80032020 the preamble reads Cause, compares the exception code
+#     against 8, and for that one alone writes `0x80081E74` into EPC and
+#     `eret`s -- so the handler runs with the trapping address still in $t0,
+#     which is what it reads its stub through.
+#
+# Without this the stubs are not functions at all: nothing in the image points
+# at one, because they are reached only through tables of pointers in the
+# game's own data, so the sweep runs them together into a few long functions
+# and the analysis reports 543 of the 4,234 as boundaries. The other 3,691 are
+# addresses the game calls and the runtime cannot find. The first one it
+# reaches ends the game a second in.
+[syscall]
+stubs   = 0x80082540
+size    = 0x8450
+handler = 0x80081E74

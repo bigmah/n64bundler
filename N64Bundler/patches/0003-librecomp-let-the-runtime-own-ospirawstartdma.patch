@@ -1,0 +1,31 @@
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 43509ba..a56290f 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -364,22 +364,10 @@ extern "C" void osPiGetStatus_recomp(RDRAM_ARG recomp_context * ctx) {
+     ctx->r2 = 0;
+ }
+ 
+-extern "C" void osPiRawStartDma_recomp(RDRAM_ARG recomp_context * ctx) {
+-    ultramodern::error_handling::message_box(
+-        "Stub `osPiRawStartDma_recomp` function called!\n"
+-        "Most games do not call this function directly, which means the libultra function\n"
+-        "that uses this function was not properly named.\n"
+-        "\n"
+-        "If you triggered this message, please make sure you have properly identified\n"
+-        "every libultra function on your recompiled game. If you are sure every libultra\n"
+-        "function has been identified and you still get this problem then open an issue on\n"
+-        "the N64ModernRuntime Github repository mentioning the game you are trying to\n"
+-        "recompile and steps to reproduce the issue.\n"
+-        "\n"
+-        "The application will close now, bye and good luck!"
+-    );
+-    ULTRAMODERN_QUICK_EXIT();
+-}
++// osPiRawStartDma was a stub here, and is not any more: a game whose own
++// loader drives the parallel interface calls it directly, so the runtime
++// implements it alongside the queued form and defines it there. Leaving the
++// stub made the two collide at link time.
+ 
+ extern "C" void osEPiRawStartDma_recomp(RDRAM_ARG recomp_context * ctx) {
+     ultramodern::error_handling::message_box(

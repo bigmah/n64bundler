@@ -23,7 +23,11 @@
 
 #include "recomp.h"
 
+#include <librecomp/addresses.hpp>
+#include <librecomp/game.hpp>
 #include <ultramodern/ultramodern.hpp>
+
+#include <cstdio>
 
 namespace {
 
@@ -76,14 +80,175 @@ extern "C" void __ll_to_d_recomp(uint8_t *rdram, recomp_context *ctx) {
 // standard way to shave a frame of input latency, so any runtime that accepts
 // arbitrary ROMs meets it eventually.
 //
-// Completing the transfer is the part that matters. The PIF's reply is left as
-// it is, so a game reading its controllers this way sees no buttons pressed --
-// which is a game that runs and does not respond, rather than a game that
-// hangs on its first frame.
+// Completing the transfer is the part that matters. The PIF's reply is
+// otherwise left as it is, so a game reading its controllers this way sees no
+// buttons pressed -- which is a game that runs and does not respond, rather
+// than a game that hangs on its first frame.
+//
+// The exception is the boot chip's challenge, below, which is a reply the game
+// cannot do without.
+
+namespace {
+
+/// The sixty-four bytes the serial interface moves between the console and the
+/// PIF. A game that drives the interface itself writes a command block here
+/// and reads the answer back out of the same place.
+uint8_t pif_ram[64] = {};
+
+/// The CIC-NUS-6105's challenge and response.
+///
+/// The boot chip is not only a lock on the cartridge: on a 6105 it will also
+/// answer a challenge, and a game can use the answer for anything it likes.
+/// Banjo-Tooie uses it as a key. Its text is stored scrambled, and the routine
+/// that unscrambles a block asks the chip for fourteen bytes and exclusive-ors
+/// the block with them. Without an answer the key is whatever the game left in
+/// the buffer, the "unscrambled" block is noise, its first halfword is read as
+/// the size to allocate, and the allocation fails -- which is a game that
+/// cannot load a line of its own text.
+///
+/// The algorithm is not Nintendo's published anything; it was recovered from
+/// the hardware and is what every emulator implements. Thirty nibbles in,
+/// twenty-eight nibbles out, two small tables and a running key.
+void cic_6105_challenge(const uint8_t *challenge, uint8_t *response, size_t length) {
+    static const uint8_t lut0[16] = {0x4, 0x7, 0xA, 0x7, 0xE, 0x5, 0xE, 0x1,
+                                     0xC, 0xF, 0x8, 0xF, 0x6, 0x3, 0x6, 0x9};
+    static const uint8_t lut1[16] = {0x4, 0x1, 0xA, 0x7, 0xE, 0x5, 0xE, 0x1,
+                                     0xC, 0x9, 0x8, 0x5, 0x6, 0x3, 0xC, 0x9};
+
+    const uint8_t *lut = lut0;
+    uint8_t key = 0xB;
+    for (size_t i = 0; i < length; i++) {
+        response[i] = uint8_t((key + 5 * challenge[i]) & 0xF);
+        key = lut[response[i]];
+
+        const int sign = (response[i] >> 3) & 1;
+        const int magnitude = (sign == 1 ? ~response[i] : response[i]) & 0x7;
+        int next = (magnitude % 3 == 1) ? sign : 1 - sign;
+        if (lut == lut1 && (response[i] == 0x1 || response[i] == 0x9)) {
+            next = 1;
+        }
+        if (lut == lut1 && (response[i] == 0xB || response[i] == 0xE)) {
+            next = 0;
+        }
+        lut = (next == 1) ? lut1 : lut0;
+    }
+}
+
+/// Answer a challenge the game has just written into the PIF's memory.
+///
+/// The command is the top bit but one of the last byte, the question is the
+/// fifteen bytes before it, and the answer goes back where the question was.
+void answer_cic_challenge() {
+    constexpr size_t kNibbles = 30;
+    uint8_t challenge[kNibbles];
+    uint8_t response[kNibbles] = {};
+
+    for (size_t i = 0; i < 15; i++) {
+        challenge[i * 2] = uint8_t((pif_ram[0x30 + i] >> 4) & 0xF);
+        challenge[i * 2 + 1] = uint8_t(pif_ram[0x30 + i] & 0xF);
+    }
+    // The last two nibbles are the command rather than the question, and the
+    // chip does not answer them.
+    cic_6105_challenge(challenge, response, kNibbles - 2);
+    pif_ram[0x2E] = 0;
+    pif_ram[0x2F] = 0;
+    for (size_t i = 0; i < 15; i++) {
+        pif_ram[0x30 + i] = uint8_t((response[i * 2] << 4) | response[i * 2 + 1]);
+    }
+}
+
+} // namespace
 
 extern "C" void __osSiRawStartDma_recomp(uint8_t *rdram, recomp_context *ctx) {
-    (void)rdram;
+    constexpr int32_t kOsRead = 0;
+    const int32_t direction = int32_t(ctx->r4);
+    const gpr buffer = ctx->r5;
+
+    if (direction == kOsRead) {
+        // The PIF's memory into the game's, which is where the answer to
+        // anything it asked comes back.
+        for (size_t i = 0; i < sizeof(pif_ram); i++) {
+            MEM_B(int32_t(i), buffer) = int8_t(pif_ram[i]);
+        }
+    } else {
+        for (size_t i = 0; i < sizeof(pif_ram); i++) {
+            pif_ram[i] = uint8_t(MEM_BU(int32_t(i), buffer));
+        }
+        // Bit one of the last byte is "ask the boot chip", and the chip clears
+        // it once it has answered. Every other command in this block is a
+        // controller port, which the runtime models a level above this and
+        // leaves alone.
+        constexpr uint8_t kChallenge = 0x02;
+        if ((pif_ram[0x3F] & kChallenge) != 0) {
+            answer_cic_challenge();
+            pif_ram[0x3F] = uint8_t(pif_ram[0x3F] & ~kChallenge);
+        }
+    }
+
     ultramodern::send_si_message();
+    ctx->r2 = 0;
+}
+
+// --- the parallel interface --------------------------------------------------
+//
+// The same gap one device over, and the one that decides whether a game with
+// its own loader starts at all.
+//
+// librecomp models the cartridge at the level of `osPiStartDma`, which hands
+// the transfer to the PI manager's queue and posts a message when it lands.
+// The raw form underneath it takes no queue: it programs the four registers
+// and returns, and the caller waits by polling `osPiGetStatus` until the
+// device says it is idle. librecomp carries that one as a stub that ends the
+// process, on the reasoning that a game reaching it means some libultra
+// function above it went unnamed.
+//
+// That reasoning holds for a game built from a decompilation. It does not hold
+// here, because a cartridge is allowed to contain a loader that is not
+// libultra at all. Banjo-Tooie's is: sixteen kilobytes at the entry point with
+// its own cut-down copy of the library, whose job is to pull the compressed
+// game out of the cartridge and unpack it. It calls the raw form directly,
+// there is nothing above it that could have been named instead, and the stub
+// is the wrong answer -- a game that never gets its own code into memory.
+//
+// The transfer is synchronous, which is what the polling caller cannot tell
+// apart from a very fast device: by the time it reads the status register the
+// bytes are already there, and `osPiGetStatus` reporting idle is then true
+// rather than merely convenient.
+//
+// `osPiRawStartDma(s32 direction, u32 devAddr, void *dramAddr, u32 size)`.
+
+extern "C" void osPiRawStartDma_recomp(uint8_t *rdram, recomp_context *ctx) {
+    const int32_t direction = int32_t(ctx->r4);
+    const gpr dram_address = ctx->r6;
+    const uint32_t size = uint32_t(ctx->r7);
+
+    // Or in the cartridge base the way librecomp's queued form does. A game
+    // that passes a bare rom offset and one that passes the KSEG1 address of
+    // the same byte both have to arrive at the same physical address, and
+    // which of the two a game does is its own business: libultra's own
+    // callers pass an address, Banjo-Tooie's loader keeps the base in a global
+    // and ors it in itself.
+    const uint32_t device_address = uint32_t(ctx->r5) | recomp::rom_base;
+    const uint32_t physical_address = device_address & 0x1FFFFFFFu;
+
+    if (direction != 0 /* OS_READ */) {
+        // Writing to the cartridge is not a thing the hardware does, and the
+        // save chips are reached through their own devices rather than this
+        // one. Reporting the failure is what libultra does for a direction it
+        // cannot serve.
+        ctx->r2 = -1;
+        return;
+    }
+    if (physical_address < recomp::rom_base) {
+        std::fprintf(stderr,
+                     "note: a raw PI read asked for 0x%08X, which is not the cartridge. "
+                     "Nothing was transferred.\n",
+                     physical_address);
+        ctx->r2 = -1;
+        return;
+    }
+
+    recomp::do_rom_read(rdram, dram_address, physical_address, size);
     ctx->r2 = 0;
 }
 

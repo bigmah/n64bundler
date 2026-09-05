@@ -16,6 +16,29 @@ std::string hex(uint32_t value, int width = 8) {
     return buffer;
 }
 
+/// How many of the record's unpacked segments turned into code.
+///
+/// A segment is there when a section of its name came out of the analysis with
+/// functions in it. The memory image is always the full eight megabytes, so a
+/// segment the game has not written yet reads as zeroes and recovers nothing --
+/// which is the difference this counts, and which is how the pipeline knows to
+/// run the game again.
+unsigned unpacked_recovered(const Analysis &analysis, const TitleRecord *record) {
+    if (record == nullptr) {
+        return 0;
+    }
+    unsigned found = 0;
+    for (const UnpackedSection &segment : record->unpacked) {
+        for (const SectionInfo &section : analysis.sections) {
+            if (section.name == segment.name && !section.functions.empty()) {
+                found++;
+                break;
+            }
+        }
+    }
+    return found;
+}
+
 /// Enough escaping for a path or a game name inside a TOML or JSON string.
 std::string quote(const std::string &value) {
     std::string out = "\"";
@@ -126,6 +149,17 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
         << "  \"save_type\": " << quote(save_type_name(analysis.save_type)) << ",\n"
         << "  \"save_type_evidence\": " << quote(analysis.save_type_evidence) << ",\n"
         << "  \"title_record\": " << quote(record == nullptr ? "" : record->path) << ",\n"
+        // How many segments this game does not carry in its cartridge, and how
+        // many of them the memory image actually held. Zero and zero for every
+        // game that keeps its code where a reader can find it.
+        //
+        // The second number is what says whether the game has been run enough
+        // times. A game that unpacks in stages only reveals the next stage once
+        // the last one is recompiled and running, so the two numbers agree only
+        // when there is nothing left to find.
+        << "  \"unpacked_segments\": " << (record == nullptr ? 0u : unsigned(record->unpacked.size()))
+        << ",\n"
+        << "  \"unpacked_recovered\": " << unpacked_recovered(analysis, record) << ",\n"
         << "  \"byte_order\": " << quote(byte_order_name(rom.original)) << ",\n"
         << "  \"cic\": " << quote(cic_name(rom.cic)) << ",\n"
         << "  \"country\": " << quote(std::string(1, rom.header.country ? rom.header.country : '?'))
@@ -179,6 +213,13 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
 
         << "  \"stubbed_functions\": " << analysis.report.stubbed_functions << ",\n"
         << "  \"stubbed_unstructured\": " << analysis.report.stubbed_unstructured << ",\n"
+        // The game's own syscall handler, and how many stubs reach it. Zero
+        // and zero for a game that leaves the exception to libultra, which is
+        // nearly all of them.
+        << "  \"syscall_handler\": " << quote(hex(analysis.syscall_handler)) << ",\n"
+        << "  \"syscall_table\": " << quote(hex(analysis.syscall_stubs)) << ",\n"
+        << "  \"syscall_table_size\": " << quote(hex(analysis.syscall_stubs_size)) << ",\n"
+        << "  \"syscall_stubs\": " << analysis.report.syscall_stubs << ",\n"
         << "  \"merged_boundaries\": " << analysis.report.merged_boundaries << ",\n"
         << "  \"names_without_implementations\": "
         << analysis.report.names_without_implementations << ",\n"

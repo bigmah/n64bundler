@@ -186,15 +186,87 @@ process_one() {
   local module="$GAMES/$game_id/$game_id.dylib"
   mkdir -p "$analysis" "$GAMES/$game_id"
 
+  # Console memory, after the game's own loader has run. Only a cartridge that
+  # holds its game compressed needs one, and only such a cartridge's title
+  # record asks for it. It sits beside the module rather than in the source
+  # tree: it is a derived work of the player's own dump, exactly as the
+  # library's copy of the ROM is.
+  local image="$GAMES/$game_id/$game_id.ram.bin"
+  # The ROM the recompiler reads. The same file as the player's, unless the
+  # analysis had to normalise the byte order or splice an unpacked segment on
+  # the end -- in either case n64rip writes the one it means.
+  local recomp_rom="$analysis/$game_id.z64"
+
+  run_rip() {
+    local rip_args=(analyze "$rom" --out-dir "$analysis")
+    [ -n "$RUNTIME_PROVIDES" ] && [ -f "$RUNTIME_PROVIDES" ] && rip_args+=(--runtime-provides "$RUNTIME_PROVIDES")
+    [ -n "$SIGNATURES" ] && [ -f "$SIGNATURES" ] && rip_args+=(--signatures "$SIGNATURES")
+    [ -n "$TITLES_DIR" ] && [ -d "$TITLES_DIR" ] && rip_args+=(--titles "$TITLES_DIR")
+    [ -f "$image" ] && rip_args+=(--unpacked "$image")
+    "$MR_BUILD/n64rip" "${rip_args[@]}" 2>&1 | tee "$1"
+    return "${PIPESTATUS[0]}"
+  }
+
+  run_port() {
+    local port_args=(build --analysis "$analysis" --out "$module")
+    if [ -f "$recomp_rom" ]; then
+      port_args+=(--rom "$recomp_rom")
+    else
+      port_args+=(--rom "$rom")
+    fi
+    [ "$FORCE" -eq 1 ] && port_args+=(--force)
+    "$MR_BUILD/n64b-port" "${port_args[@]}" 2>&1 | tee "$1"
+    return "${PIPESTATUS[0]}"
+  }
+
   step 2 4 "Recovering the metadata from the image"
   note "An N64 ROM carries no section table and no symbols, so where the code is and where each function starts has to be worked out from the instructions."
-  local rip_args=(analyze "$rom" --out-dir "$analysis")
-  [ -n "$RUNTIME_PROVIDES" ] && [ -f "$RUNTIME_PROVIDES" ] && rip_args+=(--runtime-provides "$RUNTIME_PROVIDES")
-  [ -n "$SIGNATURES" ] && [ -f "$SIGNATURES" ] && rip_args+=(--signatures "$SIGNATURES")
-  [ -n "$TITLES_DIR" ] && [ -d "$TITLES_DIR" ] && rip_args+=(--titles "$TITLES_DIR")
   local rip_log; rip_log="$(mktemp -t recompn64-rip)"
-  "$MR_BUILD/n64rip" "${rip_args[@]}" 2>&1 | tee "$rip_log"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || { rm -f "$rip_log"; die "nothing could be recovered from this ROM"; }
+  run_rip "$rip_log" || { rm -f "$rip_log"; die "nothing could be recovered from this ROM"; }
+
+  # A cartridge that holds its game compressed has to be run before it can be
+  # read, and read again before it can be run further.
+  #
+  # Its record names segments that are in no part of the image -- until the
+  # game's own loader has unpacked them, the code does not exist anywhere. So
+  # what is recovered so far is recompiled, run, and stopped at the moment it
+  # jumps into something that was not; `--unpack` writes console memory out at
+  # that point, and the analysis is done again with it.
+  #
+  # That is a loop rather than a step, because a game unpacks in stages and
+  # each stage only appears once the one before it is running. Banjo-Tooie
+  # takes two rounds: the loader reveals the core, and the core reveals the
+  # main segment. It ends when every segment the record names has come out of
+  # the image as code, which is what the analysis reports.
+  unpacked_state() {
+    sed -n "s/.*\"$1\": *\([0-9]*\).*/\1/p" "$analysis/$game_id.info.json" 2>/dev/null | head -1
+  }
+  local wanted recovered round
+  wanted="$(unpacked_state unpacked_segments)"
+  if [ "${wanted:-0}" -gt 0 ]; then
+    round=0
+    while :; do
+      recovered="$(unpacked_state unpacked_recovered)"
+      [ "${recovered:-0}" -ge "$wanted" ] && break
+      round=$((round + 1))
+      # One round per stage, and a cartridge with more stages than this is one
+      # nobody here has seen; stopping is better than looping on a game that
+      # never settles.
+      [ "$round" -gt 6 ] && { rm -f "$rip_log"
+        die "this game unpacks more stages than the pipeline will follow (stopped after $((round - 1)))"; }
+      note "This cartridge holds its game compressed: $recovered of $wanted segments are readable so far. Recompiling what there is and running it to find the next."
+      local boot_log; boot_log="$(mktemp -t recompn64-boot)"
+      run_port "$boot_log" >/dev/null 2>&1 || { rm -f "$boot_log" "$rip_log"
+        die "what has been recovered so far could not be recompiled, so the game could not be unpacked"; }
+      rm -f "$boot_log"
+      "$MR_BUILD/host/n64b-run" --module "$module" --rom "$rom" --unpack "$image" \
+        >/dev/null 2>&1
+      [ -f "$image" ] || { rm -f "$rip_log"
+        die "the game did not reach anything it had unpacked, so nothing was written to $image"; }
+      note "Reading the metadata again, with what it put in memory."
+      run_rip "$rip_log" || { rm -f "$rip_log"; die "nothing could be recovered from this ROM"; }
+    done
+  fi
 
   local name functions coverage save_type
   name="$(sed -n 's/^Title: *//p' "$rip_log")"
@@ -211,11 +283,8 @@ process_one() {
 
   step 3 4 "Recompiling $name to native arm64"
   note "MIPS to C to machine code. The first pass takes a few seconds a megabyte; later ones are cached on the ROM's hash."
-  local port_args=(build --analysis "$analysis" --rom "$rom" --out "$module")
-  [ "$FORCE" -eq 1 ] && port_args+=(--force)
   local port_log; port_log="$(mktemp -t recompn64-port)"
-  "$MR_BUILD/n64b-port" "${port_args[@]}" 2>&1 | tee "$port_log"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || { rm -f "$port_log"; die "the recompilation failed (see the log above)"; }
+  run_port "$port_log" || { rm -f "$port_log"; die "the recompilation failed (see the log above)"; }
   # n64b-port speaks the same porcelain protocol, but it is deliberately not
   # asked for it here: its step counter would collide with this one in the
   # window. Its English output is the one parse path.

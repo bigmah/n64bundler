@@ -20,7 +20,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -29,7 +31,12 @@ void usage() {
                  "usage: n64rip inspect <rom>\n"
                  "       n64rip analyze <rom> --out-dir <dir> [--signatures <db>]\n"
                  "                     [--runtime-provides <list>] [--title <record.toml>]\n"
-                 "                     [--titles <dir>] [--quiet]\n");
+                 "                     [--titles <dir>] [--unpacked <image.bin>] [--quiet]\n"
+                 "\n"
+                 "  --unpacked  console memory as `n64b-run --unpack` wrote it. A cartridge\n"
+                 "              whose game is compressed carries only a loader; the segments\n"
+                 "              a record calls unpacked are taken out of this image and\n"
+                 "              spliced onto the ROM the recompiler reads.\n");
 }
 
 bool write_file(const std::filesystem::path &path, const std::string &contents) {
@@ -80,6 +87,12 @@ void print_analysis(const n64rip::Analysis &analysis) {
         std::printf("%zu of %zu internal calls land on a function boundary (%.2f%%)\n",
                     report.calls_on_boundary, landed,
                     100.0 * double(report.calls_on_boundary) / double(landed));
+    }
+    if (report.syscall_stubs > 0) {
+        std::printf("%zu of those are two-instruction syscall stubs, which is how this game "
+                    "calls between\n    its overlays. Nothing in the image points at one, so "
+                    "the record says where the table is.\n",
+                    report.syscall_stubs);
     }
     if (report.named_functions > 0) {
         std::printf("%zu functions named from libultra signatures, %zu of them at boundaries "
@@ -151,6 +164,7 @@ int main(int argc, char **argv) {
     std::string signatures_path;
     std::string provides_path;
     std::string title_path;
+    std::string unpacked_path;
     std::string titles_dir;
     bool quiet = false;
 
@@ -166,6 +180,8 @@ int main(int argc, char **argv) {
             title_path = argv[++i];
         } else if (arg == "--titles" && i + 1 < argc) {
             titles_dir = argv[++i];
+        } else if (arg == "--unpacked" && i + 1 < argc) {
+            unpacked_path = argv[++i];
         } else if (arg == "--quiet") {
             quiet = true;
         } else {
@@ -254,6 +270,37 @@ int main(int argc, char **argv) {
         }
     }
 
+    // A cartridge that holds its game compressed has nothing past its loader
+    // to analyse. The record says so and says where the loader puts the game;
+    // the memory image says what it put there. With both, the segment is
+    // spliced onto the ROM and the rest of this runs as though the cartridge
+    // had carried it -- which is the only way a static recompiler can reach
+    // code that does not exist until the game has run.
+    bool rom_extended = false;
+    if (have_record && !record.unpacked.empty()) {
+        if (unpacked_path.empty()) {
+            std::fprintf(stderr,
+                         "note: %s says this game unpacks itself, and no memory image was "
+                         "given. Recompiling the loader alone, which is what --unpack needs "
+                         "to produce one.\n",
+                         title_path.c_str());
+        } else {
+            std::ifstream image_file(unpacked_path, std::ios::binary);
+            if (!image_file) {
+                std::fprintf(stderr, "error: could not read the memory image %s\n",
+                             unpacked_path.c_str());
+                return 1;
+            }
+            const std::vector<uint8_t> image((std::istreambuf_iterator<char>(image_file)),
+                                             std::istreambuf_iterator<char>());
+            if (!n64rip::splice_unpacked(*rom, record, image, error)) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
+            rom_extended = true;
+        }
+    }
+
     const n64rip::Analysis analysis = n64rip::analyze(
         *rom, have_signatures ? &signatures : nullptr, have_provides ? &provides : nullptr,
         have_record ? &record : nullptr);
@@ -270,10 +317,15 @@ int main(int argc, char **argv) {
     const std::string id = rom->header.game_id.empty() ? "UNKNOWN" : rom->header.game_id;
 
     // The recompiler reads the ROM itself, so it needs one in the order it
-    // expects. A z64 dump is already right and is not copied.
+    // expects. A z64 dump is already right and is not copied -- unless a
+    // segment the game unpacked has been spliced onto the end of it, in which
+    // case the file the recompiler needs is not the one on the player's disk.
     std::filesystem::path recomp_rom = std::filesystem::absolute(rom_path);
-    if (rom->original != n64rip::ByteOrder::Z64) {
-        recomp_rom = dir / (id + ".z64");
+    if (rom->original != n64rip::ByteOrder::Z64 || rom_extended) {
+        // Absolute, because the recompiler resolves a relative path in its
+        // configuration against the configuration's own directory rather than
+        // against where it was run from.
+        recomp_rom = std::filesystem::absolute(dir / (id + ".z64"));
         std::ofstream normalised(recomp_rom, std::ios::binary);
         normalised.write(reinterpret_cast<const char *>(rom->data.data()),
                          std::streamsize(rom->data.size()));
@@ -282,6 +334,13 @@ int main(int argc, char **argv) {
                          recomp_rom.string().c_str());
             return 1;
         }
+    } else {
+        // An earlier run of this same game may have written one -- the first
+        // pass over a cartridge that unpacks itself does not extend the ROM
+        // and the second does. Leaving it behind would have the recompiler
+        // read a ROM with segments in it that this analysis knows nothing
+        // about.
+        std::filesystem::remove(std::filesystem::absolute(dir / (id + ".z64")), ec);
     }
 
     const std::filesystem::path symbols = dir / (id + ".symbols.toml");

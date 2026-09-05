@@ -32,7 +32,7 @@
 
 // Bumped whenever the struct below changes shape. The host refuses a module
 // that does not match, because a stale module is a crash with no explanation.
-#define N64B_MODULE_ABI 1u
+#define N64B_MODULE_ABI 2u
 
 // The one symbol a module exports.
 #define N64B_MODULE_SYMBOL "n64b_module"
@@ -106,6 +106,25 @@ struct n64b_module_v1 {
 
     /// One of n64b_save_type.
     int save_type;
+
+    /// The game's own syscall handler, or 0 if it has none.
+    ///
+    /// A cartridge whose code does not fit in memory at once may reach between
+    /// its overlays through the CPU's syscall exception: the caller executes a
+    /// two-instruction stub, the exception handler works out from the trapping
+    /// address which function was meant, loads the overlay holding it and calls
+    /// it. libultra's exception preamble is hand-written assembly that no
+    /// recompiler can translate, so the runtime stands in for it -- and this is
+    /// the one thing it needs to know to do that, because the address is a
+    /// constant inside the assembly it is standing in for. Banjo-Tooie is the
+    /// game this exists for.
+    uint32_t syscall_handler_address;
+    /// The table of stubs that reach it, and how far it runs. A `syscall`
+    /// anywhere else is what it is for every other game -- data the analysis
+    /// read as code -- and is reported rather than dispatched, which is what
+    /// keeps one misread function from sending the runtime into another.
+    uint32_t syscall_table_address;
+    uint32_t syscall_table_size;
 
     /// What produced this module, for the "what am I running" line in a log.
     const char *analyser_revision;

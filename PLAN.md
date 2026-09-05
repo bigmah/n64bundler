@@ -197,6 +197,11 @@ Reality Coprocessor — hence `ModernReality`, the counterpart to ModernGekko.
 | audio microcode | done — `RSPRecomp` wired in, one `[[microcode]]` line per block |
 | scripted input, audio levels | done — `N64B_INPUT`, `N64B_LEVELS`; see below |
 | **a game that plays** | done — Super Mario 64, with sound, input and saves |
+| **a cartridge whose game is compressed** | done — Banjo-Tooie unpacks itself and 9,732 functions come back; see below |
+| a game linked through the syscall exception | done — the record names the stub table and the handler, and the runtime stands in for the exception |
+| **overlays recompiled at runtime** | done — a function a game decompresses into memory it allocated is translated the first time it is jumped to |
+| the boot chip's challenge | done — the PIF's memory round-trips and a CIC-6105 challenge is answered |
+| **a third game that draws** | done — Banjo-Tooie renders its world; it stalls after about forty seconds |
 
 ### Where Super Mario 64 stands
 
@@ -495,6 +500,336 @@ read one register, return it -- and the register decides which they are. Both
 games were calling `osAiGetLength` forty-five times a second and getting
 whatever was in `v0`.
 
+### A cartridge that has to be run before it can be read
+
+Banjo-Tooie is a shape the analyser had not met. Super Mario 64 and Mario
+Builder 64 are games with their code in the image; the sweep finds most of it
+and a record says where the rest landed. Banjo-Tooie is a sixteen-kilobyte
+loader followed by thirty-two megabytes of compressed data. There is no second
+segment to write down, because until the loader has run the code does not
+exist anywhere — not in the cartridge, not at any offset, not in any form a
+reader can point at.
+
+Dropped in as it stood, it recovered 83 functions out of a 32MB image and
+reported 100% of its calls placed, because all 153 calls inside the loader do
+land on a boundary. Pressing Play opened a window and closed it a quarter of a
+second later.
+
+**What the loader wanted was one function named.** `func_80001A40` is
+`osPiRawStartDma`, instruction for instruction: it spins on PI_STATUS's two
+busy bits, writes `osVirtualToPhysical` of its third argument to PI_DRAM_ADDR,
+ors its second with the cartridge base held at 0x80000308 and masks it into
+PI_CART_ADDR, and then writes size-1 to PI_WR_LEN for direction 0 and PI_RD_LEN
+for direction 1. librecomp carries that one as a stub that ends the process, on
+the reasoning that a game reaching it means some libultra function above it
+went unnamed — which is true of a game built from a decompilation and false of
+a cartridge whose loader is not libultra at all. Unnamed, its register writes
+went to the zeroed pages the host backs the RCP with, nothing was transferred,
+and the decompressor read a buffer of zeroes and walked its source pointer to
+1. That fault was the whole of what a player saw.
+
+**And then the game has to be run to be read.** With the driver named the
+loader works, unpacks two blocks, checksums them and calls 0x80012030 — which
+is not there, because it was the loader's job to put it there. So:
+
+- `n64b-run --unpack <image>` stops at the first address the runtime cannot
+  find, writes the console's eight megabytes out, and says where the game was
+  going. It hangs off a weak `recomp_missing_function` in librecomp, so a host
+  that does not care links exactly as before.
+- a record's `[[unpacked]]` block names a segment by console address and size,
+  and `n64rip --unpacked <image>` takes those bytes out of the image,
+  byte-swaps them back out of the host's word order, and splices them onto the
+  end of the ROM the recompiler reads. From there they are sections like any
+  other — the sweep runs over them, the signature database names them, and the
+  symbol file cannot tell they were not in the cartridge.
+- the pipeline loops, because a game unpacks in stages and each stage only
+  appears once the one before it is running. Banjo-Tooie takes two rounds: the
+  loader reveals the core at 0x80012030, and the core reveals the main segment
+  at 0x800815C0. The analysis reports how many of the record's segments came
+  back as code, and the loop ends when that matches how many it asked for.
+
+```
+83 functions      the loader alone, which is all the image holds
+817 functions     with the core it unpacks
+6,039 functions   with the main segment the core unpacks
+9,732 functions   with its syscall stub table cut into the functions it is
+13,802 of 13,802 internal calls land on a function boundary (100.00%)
+1 call points outside every section found
+93 functions named from libultra signatures, 4 more by shape
+```
+
+Two things had to be fixed to get there, and both were general rather than
+about this cartridge. **The escape check ran too early**: `recover_functions`
+stubs a function whose branches leave it, but it works one section at a time,
+and `split_at_cross_section_calls` adds boundaries afterwards — so a call
+arriving from a segment unpacked later can cut a function exactly where a
+branch crosses, after the only pass that would have noticed. Banjo-Tooie has
+three, all float helpers with two entry points sharing one body. **And
+N64Recomp read past the end of the ROM sizing a jump table**: the address comes
+from a linear walk of the registers, which does not follow control flow and can
+be wrong, and there was no bounds check. It segfaulted. Bounded, it names the
+function and the caller stubs it — but the message also said what was really
+wrong, which is that this segment's jump tables live in rodata 0x2C000 past the
+end of its code, and the section had to carry the hole between them, because
+the recompiler finds a jump table by assuming it sits at the same distance from
+the start of the ROM as from the start of the segment.
+
+### The black window, and the four things behind it
+
+The window stayed black with the game apparently healthy: nine threads, every
+one of them in an ordinary `osRecvMesg` or `osSendMesg` wait, the video
+interface configured with a real origin and a real framebuffer, and not one
+display list submitted in thirty seconds. Unlike Super Mario 64 this was never
+the device drivers -- Banjo-Tooie's libultra matches the signature database
+well, and `osViSwapBuffer`, `osViSetMode`, `osCreateViManager`, `osSpTaskLoad`,
+`osSpTaskStartGo`, `osContInit` and the EEPROM pair are all named without a
+record saying so.
+
+**It was sitting in its own reset handler.** One thread was not waiting: it had
+entered `osDpSetStatus` 8.7 billion times in thirty seconds, from a three-word
+loop at 0x80014A3C that nothing can leave. What is above that loop says what it
+is -- stop the rumble motors on all four controllers, read `osTvType`, put the
+video interface back to a plain mode -- and what reaches it is the retrace
+thread, on every frame, through this:
+
+```
+    jal   0x8001DCA0        # mfc0 $v0, Status
+    andi  $t6, $v0, 0x1000  # SR_IBIT5, the pre-NMI interrupt
+    bnel  $t6, $zero, ...   # set: carry on
+    jal   0x800149BC        # clear: the reset button has been pressed
+```
+
+libultra masks the pre-NMI interrupt off when RESET is pressed, so a game that
+sees that bit clear knows it is being reset and blanks the screen until the NMI
+arrives half a second later. `cop0_status_read` returned `ctx->status_reg`,
+which nothing ever writes, which is zero. The check fired on the first retrace
+and the game did what it was told for the rest of the run. A game reads that
+register to find out what the console is doing, not only to change it, and this
+one is the whole of what a player saw.
+
+So the status register is modelled rather than left empty. The interrupt bits
+-- IE and the eight mask bits, the low half of libultra's `OS_IM_ALL` -- are
+what a console running a game has and what this runtime can never change, so
+they are reported set and a write to them is stored and otherwise ignored,
+which is what the runtime's own `osSetIntMask` already does one level up. The
+exception-level and coprocessor-usable bits are stored the same way: there are
+no exceptions here, and every coprocessor a translated instruction uses is
+always available, so a game turning the floating point unit on at boot is
+asking for something that is already true. Only the FR bit still does anything,
+and only a bit nobody has reasoned about is reported -- once, rather than by
+ending the game, which is the wrong trade for a bundler and the same one the
+host already makes for an RSP task it cannot run.
+
+A side effect worth having: a function whose only coprocessor 0 access is the
+status register no longer has to be stubbed, because the runtime has something
+to say for it now. Banjo-Tooie's stubs fell from 20 to 10.
+
+**Then its trigonometry returned to nowhere.** Four functions are pairs of
+entry points that set up their own constants and share one body, and each keeps
+the caller's return address out of the way of the call it is about to make:
+
+```
+    or    $a1, $ra, $zero    # keep the caller's return address
+    jal   0x80013818         # which this is about to overwrite
+    jr    $a1                # and return to it
+```
+
+A `jr` through anything but `$ra` was an indirect tail call, which looks the
+register up in the address-to-function map -- and a return address is not the
+start of a function. Here it failed on zero, because nothing writes `$ra` in
+recompiled code at all: a call is a C call and its return address is the
+host's. The recompiler now reads a `jr` as a return when every write to that
+register anywhere in the function is a move from `$ra` and none of them comes
+after an instruction that links. A register built with `lui` or loaded from
+memory -- an exception vector, a real function pointer -- fails that test and
+is still a tail call, which is what the other four in this cartridge are.
+
+**Then it read its cartridge with a load and got zeroes.** The parallel
+interface is not only a DMA engine: the cartridge is mapped, and a load from
+0xB0000000 plus a ROM offset reads a word of it directly. libultra reads
+everything with a transfer, so a game built from a decompilation never needs
+this. A game that wrote its own loader may, and Banjo-Tooie's overlay directory
+is read one word at a time with `lui $s0, 0xB000; or $s0, $s0, $a0; lw $t2,
+0($s0)`, with interrupts off, because a four-byte DMA is not worth the queue.
+That load landed in the zeroed pages the register window is backed by, so every
+entry of the directory read zero and the first overlay it tried to load was
+allocated a garbage size. The host now fills that window with the cartridge --
+copied rather than aliased, because the ROM is big-endian and the runtime keeps
+memory so that an aligned word is a word this machine can load, and
+`do_rom_read` is the call that puts one into the other.
+
+### A game linked through the syscall exception
+
+Thirty-two megabytes of game do not fit in eight megabytes of console.
+Banjo-Tooie holds its code in 886 overlays and loads them as it needs them, so
+a call from one into another cannot be a `jal` -- the callee may not be in
+memory. Every one of them goes to a two-instruction stub instead, and the 4,234
+stubs in one table at 0x80082540 are the whole of the game's linkage:
+
+```
+800893C8: syscall 0x309          which function, in the code field
+800893CC: addi    $t0, $zero, 0  which entry point of its overlay
+```
+
+libultra's exception preamble reads Cause, and for an exception of type Sys
+alone it writes 0x80081E74 into EPC and `eret`s -- so the game's own handler
+runs with the address of the trapping instruction still in `$t0`, which is how
+it knows which stub it came from. The handler reads that stub's own words back
+out of memory, finds the overlay in a directory on the cartridge, loads and
+decompresses it, assembles a thunk, rewrites the stub into a jump to that
+thunk, and returns to the stub -- which now jumps to the thunk, which calls the
+function and then calls the routine that puts the overlay back.
+
+Nothing in the image can be followed into any of that. The stubs are reached
+only through tables of pointers in the game's own data, so no `jal` names one
+and the sweep ran them together into a few long functions: 543 of the 4,234 had
+a boundary and the other 3,691 were addresses the game calls and the runtime
+could not find. The handler is reached only through the exception vector, which
+is hand-written assembly this analysis stubs, and the two are tied together by
+a constant inside that assembly.
+
+So a record says where the table is and where the handler is, and neither is
+trusted without a check:
+
+- **the table checks itself.** Every eight bytes of it begins with a `syscall`,
+  and nothing a compiler emits contains one at all, so the recorded range reads
+  every entry or almost none. n64rip cuts it into 4,234 two-instruction
+  functions, and Banjo-Tooie goes from 6,039 functions to 9,732.
+- **the runtime stands in for the exception**, calling the game's handler with
+  the trapping address in `$t0`, the way the preamble would.
+- **and it reads the two things the game wrote after it was compiled rather
+  than executing them.** The rewritten stub is a word to decode; the thunk is a
+  handful of instructions the host interprets -- constants, an add, a load, a
+  store and the two kinds of jump, delay slots included -- because code a game
+  assembles while it runs is in no cartridge and there is nothing to translate.
+  `jal` calls a translated function and comes back, which is how a thunk of
+  "call the function, then put the overlay back" runs both halves; `j` and `jr`
+  are the end of it. An instruction the interpreter does not know stops it and
+  says which, because a thunk nobody has seen is something to look at rather
+  than something to guess about. The recursion ends for the same reason it does
+  on the console: the handler rewrites the stub before it returns to it.
+
+### Code that is in no cartridge
+
+Past its stub table, Banjo-Tooie stops being a static recompilation problem.
+The game reads its overlay directory straight off the cartridge, allocates a
+buffer, decompresses an overlay into it and calls the code there -- and that
+code is in no part of the image a reader can point at, at an address the
+allocator picked. `[[unpacked]]` cannot answer this one: there are 886
+overlays, they are freed, and their addresses are reused, so no fixed set of
+sections describes them.
+
+What answers it is doing the work when the address is known, which is the
+moment the game jumps to it. The runtime already notices -- `get_function`
+fails -- so the hook that said where a game was going now gets the chance to
+say what is there instead, and the host translates it: the same recompiler the
+pipeline runs offline, over the same instructions, read out of the console's
+memory rather than out of a file. N64Recomp's live recompiler is already
+vendored, because librecomp drives it for mods.
+
+Three things had to be right, and each is the kind of thing that is only
+obviously necessary afterwards.
+
+**Where the function ends.** The rule is the analyser's, applied to memory:
+walk forward remembering the furthest anything inside jumps to, and end at the
+first `jr $ra` whose delay slot is at or past that, because a function with
+several returns branches over the earlier ones. The rest of it is about not
+believing data -- a word that does not decode, a branch above the address we
+were told is the start, a jump outside the console's memory -- since running
+whatever happens to be there is the one outcome worth avoiding.
+
+**Which code a translation was made from.** An overlay is freed and its address
+handed to another, so a translation is only good while the code behind it is
+still there. Two words do not settle that: nearly every function on this
+machine begins by making a stack frame and saving the return address, so a
+wrong answer looks exactly like a right one. Keeping the whole body and
+comparing it is a memcmp of a few hundred bytes against memory that is already
+warm, and it is the difference between running the overlay the game asked for
+and running the one that used to be there.
+
+**And a way to see inside it.** Generated code carries no symbol, so a native
+backtrace through it is a bare address -- which is the least useful thing to be
+looking at when a game has just gone wrong inside code that was translated a
+second ago. Each translation records where it landed, and the backtrace names
+the frames that fall inside one by the address they were translated from, which
+is the only name they have ever had. `N64B_OVERLAYS=1` says what was translated
+and what each overlay call returned, and every run reports the count however it
+ends, because a game that had code translated while it ran is a game whose
+analysis did not have all of it.
+
+### The key the boot chip holds
+
+Past the overlays, the game loads its text -- and could not. The chain is five
+calls deep and every one of them worked:
+
+```
+func_800D674C(asset)     not in the cache, so load it
+  func_800D5B34          this asset's type is 10, which means scrambled
+    stub 0x800888A8      an overlay call, which loads and runs
+      func_80316A8C      allocate, DMA the block in, unscramble it,
+                         read its first halfword as the size to allocate
+```
+
+The size came back as 0xFFFB5740, which no allocator will serve, so the load
+returned zero and the caller -- which does not expect a null -- dereferenced
+it. The size is garbage because the unscrambling is: `func_803168C8` exclusive-
+ors the block with a fourteen-byte key, and the key comes from
+`func_803167E0`, which builds a challenge out of the asset index, writes it
+into the serial interface's buffer, and reads the answer back.
+
+**That is the boot chip.** Bit one of the last byte of that sixty-four-byte
+block is "ask the CIC", and on a 6105 -- which is the chip in this cartridge --
+the chip answers a challenge with a response that nothing else can produce.
+Banjo-Tooie uses the answer as the key to its own text. The runtime completed
+the transfer and left the buffer alone, so the game exclusive-ored its text
+with its own question and got noise.
+
+So the runtime holds the PIF's sixty-four bytes now, moves them in and out on
+`__osSiRawStartDma` the way the hardware does, and answers the challenge when
+the game asks: thirty nibbles in, twenty-eight out, two small tables and a
+running key. The algorithm is not published by anyone; it was recovered from
+the hardware and is what every emulator implements, and it is written down in
+`ultra_gaps.cpp` beside the rest of the serial interface.
+
+A game that drives the interface only to read its controllers is unaffected:
+its command block goes into the PIF's memory and comes back out unchanged,
+which is the same thing it saw before.
+
+### A watch that can see a halfword
+
+Finding that took `n64b-port --watch`, and the watch could not see it. Every
+access in recompiled code goes through one of the `MEM_` macros and the watch
+redefined only `MEM_W`, so a game's halfwords and bytes -- a count, an id, a
+flag, which is most of what a watch is wanted for -- were invisible, and the
+tool reported nothing at all and looked like an answer. All five widths are
+watched now, and the match is on the word an access falls in rather than the
+exact address, so a byte inside a watched word is reported too.
+
+### Where Banjo-Tooie is now
+
+**It draws.** This is the game's own world, read out of the console's memory
+exactly as the video interface would scan it:
+
+```
+note: the game submitted its first display list, and RT64 recognises its microcode.
+note: wrote frame.ppm, 304 by 226, from the frame at 0x003BC6E0
+304x226, 1,022 colours
+```
+
+Textured geometry, a rock face, grass, a stone path. It runs its game loop for
+about forty seconds -- 781 display lists, 48,715 calls through its overlay
+system, 434 functions translated while it ran and none refused -- and then the
+game thread stops submitting frames while every other thread carries on. The
+video interface keeps scanning, the retrace thread keeps ticking, and nothing
+reports an error.
+
+That is the next thing to find, and it is a different kind of problem from any
+of the ones above: not a mechanism that is missing, but a wait that is not
+being woken. Where it stops is not fixed -- 358 display lists in one run, 781
+in another -- which points at timing rather than at a particular piece of data,
+and the two candidates worth trying first are the audio task the host completes
+without running, and the display processor's own interrupt.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is
@@ -531,9 +866,19 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **More titles.** Two is not a sample. Everything the analyser knows how to
-   do it learned from Super Mario 64 and Mario Builder 64, and the next ROM
-   will teach it something else.
+3. **Banjo-Tooie's first frame.** It boots, unpacks itself and runs its
+   scheduler; it draws nothing. Its libultra is named, so this is not the
+   Super Mario 64 problem, and the next thing to find out is whether it ever
+   builds a display list at all.
+4. **Measuring an unpacked segment rather than being told it.** The two numbers
+   a `[[unpacked]]` block carries were both found mechanically — the entry is
+   what the runtime reported it could not find, and the extent is every word
+   that differs from what IPL3 copied. Both could be done by the analyser
+   instead of by hand, and then a compressed cartridge would need no record at
+   all beyond the one driver name.
+5. **More titles.** Three is not a sample. Everything the analyser knows how to
+   do it learned from Super Mario 64, Mario Builder 64 and Banjo-Tooie, and the
+   next ROM will teach it something else.
 
 ## Not in scope yet
 

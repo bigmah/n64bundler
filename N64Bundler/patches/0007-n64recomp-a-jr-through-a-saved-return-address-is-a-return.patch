@@ -1,0 +1,77 @@
+diff --git a/src/recompilation.cpp b/src/recompilation.cpp
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -536,6 +536,64 @@
+             generator.emit_goto(fmt::format("after_{}", link_branch_index));
+         }
+         return true;
++    };
++
++    // Whether a `jr` through this register is a return in disguise.
++    //
++    // A hand-written function may keep its return address somewhere other than
++    // $ra, so that it can call a helper -- which overwrites $ra -- and still
++    // come back to its own caller:
++    //
++    //     or   $a1, $ra, $zero      # keep the caller's return address
++    //     jal  0x80013818           # which this is about to overwrite
++    //     jr   $a1                  # and return to it
++    //
++    // Banjo-Tooie's trigonometry does that four times over: pairs of entry
++    // points that set up their own constants and share one body. A `jr`
++    // through anything but $ra is otherwise an indirect tail call, which looks
++    // the register up in the address-to-function map -- and a return address is
++    // not the start of a function, so the lookup fails and the runtime ends the
++    // game. It fails on zero, in fact, because nothing writes $ra in recompiled
++    // code at all: a call is a C call and its return address is the host's.
++    //
++    // The test is deliberately narrow. Every write to the register anywhere in
++    // the function has to be a move from $ra, and none of them may come after
++    // an instruction that links, which is what would leave the register holding
++    // some inner call's return address rather than this function's. A register
++    // built with `lui` or loaded from memory -- an exception vector, a real
++    // function pointer -- fails it and is still a tail call.
++    auto returns_through = [&instructions](int reg) {
++        constexpr int ra = (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_ra;
++        if (reg == 0 || reg == ra) {
++            return false;
++        }
++        bool moved_from_ra = false;
++        bool linked = false;
++        for (const rabbitizer::InstructionCpu& scan : instructions) {
++            const int scan_rd = (int)scan.GetO32_rd();
++            const int scan_rt = (int)scan.GetO32_rt();
++            const int scan_rs = (int)scan.GetO32_rs();
++            const bool writes = (scan.modifiesRd() && scan_rd == reg) ||
++                                (scan.modifiesRt() && scan_rt == reg) ||
++                                (scan.modifiesRs() && scan_rs == reg);
++            if (writes) {
++                const InstrId scan_id = scan.getUniqueId();
++                const bool is_register_move =
++                    scan_id == InstrId::cpu_or || scan_id == InstrId::cpu_add ||
++                    scan_id == InstrId::cpu_addu || scan_id == InstrId::cpu_dadd ||
++                    scan_id == InstrId::cpu_daddu;
++                const bool from_ra = scan_rd == reg && ((scan_rs == ra && scan_rt == 0) ||
++                                                        (scan_rs == 0 && scan_rt == ra));
++                if (linked || !is_register_move || !from_ra) {
++                    return false;
++                }
++                moved_from_ra = true;
++            }
++            if (scan.doesLink()) {
++                linked = true;
++            }
++        }
++        return moved_from_ra;
+     };
+ 
+     if (indent) {
+@@ -679,7 +737,7 @@
+         }
+         break;
+     case InstrId::cpu_jr:
+-        if (rs == (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_ra) {
++        if (rs == (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_ra || returns_through(rs)) {
+             print_return_with_delay_slot();
+         } else {
+             auto jtbl_find_result = std::find_if(stats.jump_tables.begin(), stats.jump_tables.end(),

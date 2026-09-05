@@ -506,20 +506,47 @@ void n64b_trace(const char *name, const void *ctx);
 
 #ifdef N64B_WATCH
 // A watch on one game address, for the question static analysis cannot answer:
-// which function touches this global? Every 32-bit access in the recompiled
-// code goes through MEM_W, so redefining it after recomp.h has had its say is
-// enough. Slow, and only ever on in a --watch build.
+// which function touches this global? Every access in the recompiled code goes
+// through one of the MEM_ macros, so redefining them after recomp.h has had
+// its say is enough. Slow, and only ever on in a --watch build.
+//
+// All five widths, because a game keeps as much in halfwords and bytes as it
+// does in words -- a count, an id, a flag -- and a watch that only sees words
+// reports nothing at all for those and looks like an answer.
+//
+// The match is on the word the access falls in rather than on the exact
+// address, so a byte inside a watched word is reported too; what is printed is
+// the address the game actually touched.
 void n64b_watch(unsigned address, const char *where);
 
-static inline int *n64b_mem_w(unsigned char *rdram, long long address, const char *where) {
-    if ((unsigned)address == (unsigned)N64B_WATCH) {
+static inline void n64b_watch_if(long long address, const char *where) {
+    if (((unsigned)address & ~3u) == ((unsigned)N64B_WATCH & ~3u)) {
         n64b_watch((unsigned)address, where);
     }
-    return (int *)(rdram + (address - 0xFFFFFFFF80000000ll));
 }
 
+#define N64B_WATCHED(type, name, twist)                                                  \
+    static inline type *name(unsigned char *rdram, long long address, const char *where) { \
+        n64b_watch_if(address, where);                                                   \
+        return (type *)(rdram + ((address ^ (twist)) - 0xFFFFFFFF80000000ll));           \
+    }
+
+N64B_WATCHED(int, n64b_mem_w, 0)
+N64B_WATCHED(short, n64b_mem_h, 2)
+N64B_WATCHED(unsigned short, n64b_mem_hu, 2)
+N64B_WATCHED(signed char, n64b_mem_b, 3)
+N64B_WATCHED(unsigned char, n64b_mem_bu, 3)
+
 #undef MEM_W
+#undef MEM_H
+#undef MEM_HU
+#undef MEM_B
+#undef MEM_BU
 #define MEM_W(offset, reg) (*n64b_mem_w(rdram, (long long)((reg) + (offset)), __func__))
+#define MEM_H(offset, reg) (*n64b_mem_h(rdram, (long long)((reg) + (offset)), __func__))
+#define MEM_HU(offset, reg) (*n64b_mem_hu(rdram, (long long)((reg) + (offset)), __func__))
+#define MEM_B(offset, reg) (*n64b_mem_b(rdram, (long long)((reg) + (offset)), __func__))
+#define MEM_BU(offset, reg) (*n64b_mem_bu(rdram, (long long)((reg) + (offset)), __func__))
 #endif
 
 #endif
@@ -652,6 +679,11 @@ std::string emit_module_cpp(const std::string &info_json, const std::string &rom
     const std::string display = json_string(info_json, "display_name");
     const std::string entrypoint = json_string(info_json, "entrypoint");
     const std::string save_type = json_string(info_json, "save_type");
+    // Empty for every game whose exceptions belong to libultra alone, which
+    // the descriptor spells as zero.
+    const std::string syscall_handler = json_string(info_json, "syscall_handler");
+    const std::string syscall_table = json_string(info_json, "syscall_table");
+    const std::string syscall_table_size = json_string(info_json, "syscall_table_size");
     const uint64_t rom_size = json_number(info_json, "rom_size");
 
     out << "extern \"C\" N64B_MODULE_EXPORT const n64b_module_v1 n64b_module = {\n"
@@ -670,6 +702,12 @@ std::string emit_module_cpp(const std::string &info_json, const std::string &rom
         << "    .num_overlays = ARRLEN(overlay_sections_by_index),\n"
         << "    .get_rsp_microcode = select_microcode,\n"
         << "    .save_type = " << save_type_value(save_type) << ", // " << save_type << "\n"
+        << "    .syscall_handler_address = "
+        << (syscall_handler.empty() ? std::string("0") : syscall_handler) << "u,\n"
+        << "    .syscall_table_address = "
+        << (syscall_table.empty() ? std::string("0") : syscall_table) << "u,\n"
+        << "    .syscall_table_size = "
+        << (syscall_table_size.empty() ? std::string("0") : syscall_table_size) << "u,\n"
         << "    .analyser_revision = " << quote_c(json_string(info_json, "analyser")) << ",\n"
         << "    .builder_revision = " << quote_c(kPortRevision) << ",\n"
         << "};\n";

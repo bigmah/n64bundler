@@ -1,0 +1,41 @@
+diff --git a/src/analysis.cpp b/src/analysis.cpp
+index 9eaaa30..c42a2a6 100644
+--- a/src/analysis.cpp
++++ b/src/analysis.cpp
+@@ -289,7 +289,14 @@ bool N64Recomp::analyze_function(const N64Recomp::Context& context, const N64Rec
+             JumpTable& cur_jtbl = stats.jump_tables[i];
+ 
+             if (cur_jtbl.got_offset.has_value()) {
+-                uint32_t got_word = byteswap(*reinterpret_cast<const uint32_t*>(&context.rom[got_rom_addr + cur_jtbl.got_offset.value()]));
++                const uint32_t got_entry_addr = got_rom_addr + cur_jtbl.got_offset.value();
++                if (got_entry_addr + sizeof(uint32_t) > context.rom.size()) {
++                    fmt::print("Global offset table entry for the jump table at 0x{:08X} is "
++                               "outside the rom (rom offset 0x{:08X} of 0x{:08X})\n",
++                               cur_jtbl.vram, got_entry_addr, (uint32_t)context.rom.size());
++                    return false;
++                }
++                uint32_t got_word = byteswap(*reinterpret_cast<const uint32_t*>(&context.rom[got_entry_addr]));
+ 
+                 cur_jtbl.vram += (section->ram_addr + got_word);
+             }
+@@ -322,6 +329,20 @@ bool N64Recomp::analyze_function(const N64Recomp::Context& context, const N64Rec
+             // Retrieve the current entry of the jump table
+             // TODO same as above
+             uint32_t rom_addr = vram + func.rom - func.vram;
++            // The address came out of a linear read of the registers, which
++            // does not follow control flow and so can be wrong. When it is,
++            // this indexes the rom with whatever it happened to produce. A
++            // game recovered from a bare cartridge meets that: its rodata is
++            // not where a decompilation would have put it, and the register
++            // walk lands outside the image entirely. Refusing the function is
++            // the same answer as any other jump table this cannot size, and
++            // the caller stubs it and carries on.
++            if (rom_addr + sizeof(uint32_t) > context.rom.size()) {
++                fmt::print("Jump table at 0x{:08X} for instruction at 0x{:08X} is outside the rom "
++                           "(rom offset 0x{:08X} of 0x{:08X})\n",
++                           cur_jtbl.vram, cur_jtbl.jr_vram, rom_addr, (uint32_t)context.rom.size());
++                return false;
++            }
+             uint32_t jtbl_word = byteswap(*reinterpret_cast<const uint32_t*>(&context.rom[rom_addr]));
+ 
+             if (cur_jtbl.got_offset.has_value() && got_ram_addr.has_value()) {

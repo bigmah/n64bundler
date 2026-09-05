@@ -73,6 +73,30 @@ void shutdown_audio();
 /// ends. Only does anything for a module built with `n64b-port --trace`.
 void install_trace(bool catch_signals);
 
+// --- code that is in no cartridge ------------------------------------------
+
+/// Recompile the function at `vram` out of the console's own memory, and hand
+/// back something callable. Null if there is no function there.
+///
+/// This is for a game that decompresses its code into memory it allocated,
+/// where there is nothing to analyse ahead of time and no address to write
+/// down. See overlays.cpp.
+recomp_func_t *recompile_at(uint8_t *rdram, uint32_t vram);
+
+/// Which function a native address belongs to, if it is inside code the
+/// runtime generated, or 0. Generated code carries no symbol, so a backtrace
+/// through it needs this to say anything at all.
+uint32_t generated_owner(const void *address);
+
+/// How much of that happened, said once when the game ends.
+void report_recompiled(void);
+
+/// The game's own syscall dispatch, out of the module descriptor: the handler,
+/// and the table of stubs that reach it. All zero for a game whose exceptions
+/// are libultra's alone, which is nearly all of them; see
+/// n64b_module_v1::syscall_handler_address.
+void set_syscall_handler(uint32_t handler, uint32_t table, uint32_t table_size);
+
 /// Where the game's memory is, so a `--watch` build can print what the watched
 /// address holds rather than only who touched it.
 void set_watch_memory(uint8_t *rdram);

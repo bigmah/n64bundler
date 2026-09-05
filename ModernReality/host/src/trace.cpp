@@ -16,6 +16,8 @@
 
 #include <atomic>
 #include <execinfo.h>
+
+#include "host.hpp"
 #include <csignal>
 #include <initializer_list>
 #include <cstdio>
@@ -294,6 +296,12 @@ void dump_threads() {
 }
 
 void dump() {
+    // Said however the game ends, and whether or not it was built for tracing:
+    // a game that had to have code translated while it ran is a game whose
+    // analysis did not have all of it, and that is worth knowing even when
+    // everything worked.
+    n64b::report_recompiled();
+
     // The runtime ends a game by calling `exit` from wherever it noticed --
     // an indirect call to an address no function covers, most often -- and
     // this runs on that same stack, so a backtrace here names the recompiled
@@ -303,6 +311,16 @@ void dump() {
     std::fprintf(stderr, "\n--- where the game was when it ended ---\n");
     std::fflush(stderr);
     backtrace_symbols_fd(frames, depth, 2);
+    // A frame with no symbol may be code the runtime generated while the game
+    // ran, which has no symbol to have. Name those by the address they were
+    // translated from, which is the only name they have ever had.
+    for (int i = 0; i < depth; i++) {
+        const unsigned owner = n64b::generated_owner(frames[i]);
+        if (owner != 0) {
+            std::fprintf(stderr, "%-4d(recompiled while running: the function at 0x%08X)\n", i,
+                         owner);
+        }
+    }
     dump_memory("at exit");
     const size_t total = next.load();
     if (total == 0) {
@@ -332,7 +350,7 @@ extern "C" void n64b_watch(unsigned address, const char *where) {
     // then cleared reads as the value appearing and then going back to zero --
     // which is the shape of the bug this exists to find.
     static size_t reported = 0;
-    if (reported++ >= 40) {
+    if (reported++ >= 120) {
         return;
     }
     std::fprintf(stderr, "watch: %2zu  0x%08X = 0x%08X, in %s\n", reported, address,

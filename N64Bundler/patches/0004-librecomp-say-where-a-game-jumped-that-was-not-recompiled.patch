@@ -1,0 +1,31 @@
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8c8e5d1..67d796b 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -361,9 +361,26 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
+ }
+ 
++// Called just before the runtime gives up on an address, if anything defines
++// it, and given the chance to answer with a function.
++//
++// A game whose own loader unpacks its code, or whose overlays are decompressed
++// into memory it allocated, jumps to addresses that were never recompiled --
++// and that address is the single most useful thing about the failure. A host
++// may only want to say where the game was going; it may also be able to
++// translate what is there, in which case it returns it and the game carries
++// on. Weak, so a host that does neither links exactly as before.
++extern "C" recomp_func_t* recomp_missing_function(int32_t addr) __attribute__((weak));
++
+ extern "C" recomp_func_t * get_function(int32_t addr) {
+     auto func_find = func_map.find(addr);
+     if (func_find == func_map.end()) {
++        if (recomp_missing_function != nullptr) {
++            recomp_func_t* recovered = recomp_missing_function(addr);
++            if (recovered != nullptr) {
++                return recovered;
++            }
++        }
+         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+         assert(false);
+         std::exit(EXIT_FAILURE);

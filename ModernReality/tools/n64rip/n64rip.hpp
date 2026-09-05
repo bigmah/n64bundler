@@ -194,6 +194,9 @@ struct AnalysisReport {
     /// body -- libultra's exception preamble is the one every game has -- and
     /// they do not divide into functions at all.
     size_t stubbed_unstructured = 0;
+    /// Two-instruction functions cut out of a game's syscall stub table. Zero
+    /// for a game that has no such table, which is nearly all of them.
+    size_t syscall_stubs = 0;
 
     /// Functions that were stubbed even though a signature knew what they are,
     /// because the runtime has no implementation to put in their place. Each
@@ -271,6 +274,12 @@ struct Analysis {
     std::vector<SectionInfo> sections;
     std::vector<MicrocodeInfo> microcode;
     AnalysisReport report;
+    /// The game's own syscall dispatch, if it has one -- the handler, and the
+    /// table of stubs that reach it. Zero for every game that leaves the
+    /// exception to libultra. See SyscallDispatch.
+    uint32_t syscall_handler = 0;
+    uint32_t syscall_stubs = 0;
+    uint32_t syscall_stubs_size = 0;
     /// What the module tells the runtime to use.
     SaveType save_type = SaveType::AllowAll;
     /// The family the libultra names in the image point at, before the record
@@ -301,6 +310,55 @@ bool load_runtime_provides(const std::string &path, RuntimeProvides &out, std::s
 // and checked into the repo. A record holds addresses, sizes and a hash --
 // measurements of a cartridge, never bytes of one.
 
+/// A segment that is not in the cartridge at all.
+///
+/// Some cartridges hold their game compressed and unpack it at boot. There is
+/// nothing to recover from the image for those -- until the loader has run,
+/// the code does not exist anywhere -- so the loader is recompiled on its own,
+/// run once under `n64b-run --unpack`, and what it put in memory is written
+/// out. This says which part of that image is the game.
+///
+/// The addresses are of console memory, not of the cartridge. A record can
+/// hold them for the same reason it can hold a section's: they are two numbers
+/// somebody measured, and the bytes they describe stay with the player's own
+/// dump.
+struct UnpackedSection {
+    std::string name;
+    uint32_t vram = 0;
+    uint32_t size = 0;
+};
+
+/// A game that dispatches through the CPU's syscall exception.
+///
+/// A cartridge too big to hold in memory at once splits its code into overlays
+/// and needs a way for one to call into another that may not be loaded. A game
+/// can do that with a table of stubs and its own exception handler: every call
+/// between overlays goes to a two-instruction stub -- `syscall <n>` and a word
+/// that carries the rest of the index -- and the handler works out from the
+/// address of the trapping instruction which function was wanted, loads the
+/// overlay it lives in, and calls it.
+///
+/// Nothing in the image can be followed into that. The stubs are reached only
+/// through tables of pointers in the game's own data, so no `jal` names one;
+/// the handler is reached only through the exception vector, which is
+/// hand-written assembly this analysis stubs; and the two are tied together by
+/// a constant inside that assembly. So it is written down, and checked by
+/// shape: every eight bytes of the recorded range has to be a `syscall`.
+///
+/// `handler` is the address libultra's exception preamble hands control to for
+/// an exception of type Sys, with the trapping address in $t0 -- which is what
+/// the game's own handler arranges by writing EPC before it returns.
+struct SyscallDispatch {
+    bool present = false;
+    /// The first stub. Also the base the handler subtracts to get an index,
+    /// so it is exact rather than approximate.
+    uint32_t stubs = 0;
+    /// How far the table runs. A multiple of eight.
+    uint32_t size = 0;
+    /// The game's handler, which the runtime calls in the exception's place.
+    uint32_t handler = 0;
+};
+
 struct TitleRecord {
     /// Where it was read from, for the log line that says a record was used.
     std::string path;
@@ -320,8 +378,26 @@ struct TitleRecord {
     std::vector<FunctionRange> functions;
     /// Blocks of RSP microcode, which nothing in the image points at.
     std::vector<MicrocodeInfo> microcode;
+    /// Segments the game's own loader unpacks into memory, which are in no
+    /// part of the cartridge a reader can point at.
+    std::vector<UnpackedSection> unpacked;
+    /// The game's own syscall dispatch, for a game that has one.
+    SyscallDispatch syscall;
     std::vector<std::string> notes;
 };
+
+/// Splice the segments a record calls unpacked onto the end of the ROM image.
+///
+/// `image` is console memory as `n64b-run --unpack` wrote it: eight megabytes
+/// from 0x80000000, each 32-bit word in the host's order rather than the
+/// cartridge's. Each segment is byte-swapped back and appended to `rom.data`,
+/// and a section naming where it landed is added to `record.sections`, so that
+/// everything downstream -- function recovery, the symbol file, the recompiler
+/// reading the ROM -- treats it as though the cartridge had carried it all
+/// along. The ROM's hash is left alone: it identifies the cartridge, and the
+/// cartridge has not changed.
+bool splice_unpacked(Rom &rom, TitleRecord &record, const std::vector<uint8_t> &image,
+                     std::string &error);
 
 /// Read a title record. Returns false with `error` set if the file is not
 /// readable or not a record; a missing file is an error, since the caller only

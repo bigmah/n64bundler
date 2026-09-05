@@ -14,6 +14,7 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include <librecomp/addresses.hpp>
 #include <librecomp/game.hpp>
 #include <librecomp/overlays.hpp>
 #include <librecomp/rsp.hpp>
@@ -37,12 +39,20 @@ struct Options {
     fs::path config_dir;
     bool fullscreen = false;
     bool developer = false;
+    std::string unpack;
 };
 
 void usage() {
     std::fprintf(stderr,
                  "usage: n64b-run --module <game.dylib> --rom <game.z64>\n"
-                 "                [--config-dir <dir>] [--fullscreen] [--developer]\n");
+                 "                [--config-dir <dir>] [--fullscreen] [--developer]\n"
+                 "                [--unpack <image.bin>]\n"
+                 "\n"
+                 "  --unpack  run until the game jumps to code that was not recompiled,\n"
+                 "            then write the console's memory to <image.bin> and stop.\n"
+                 "            A cartridge whose game is compressed is unpacked by its own\n"
+                 "            loader and by nothing else; this is how the unpacked code is\n"
+                 "            got at, so that the analyser can have a second look with it.\n");
 }
 
 fs::path default_config_dir() {
@@ -58,6 +68,21 @@ n64b_rsp_selector module_microcode = nullptr;
 
 /// The sections the loaded module declared, for the callback below.
 const n64b_module_v1 *loaded_module = nullptr;
+
+/// Where `--unpack` writes, and the console's memory to write from. Both are
+/// file-scope because the runtime asks for them from a callback that carries
+/// no context, at a moment nothing else on the way there knows about.
+std::string unpack_path;
+uint8_t *console_memory = nullptr;
+
+/// What the console has: eight megabytes with the expansion pak, which is what
+/// librecomp gives every game.
+constexpr size_t kRdramSizeBytes = 8 * 1024 * 1024;
+
+/// How big the cartridge is, so the window below can hold all of it and no
+/// more. Taken from the file the runtime was handed, which is the same file it
+/// reads every DMA out of.
+size_t cartridge_bytes = 0;
 
 /// Put every section where the analysis says it runs.
 ///
@@ -106,10 +131,44 @@ void map_register_window(uint8_t *rdram) {
     }
 }
 
+/// Put the cartridge where the console has it.
+///
+/// The parallel interface is not only a DMA engine: the cartridge is mapped,
+/// and a load from 0xB0000000 plus a ROM offset reads a word of it directly.
+/// libultra never does that -- everything it reads it reads with a transfer --
+/// so a game built from a decompilation never needs this. A game that wrote
+/// its own loader may: Banjo-Tooie's overlay table is read one word at a time
+/// with `lui $s0, 0xB000; or $s0, $s0, $a0; lw $t2, 0($s0)`, straight off the
+/// cartridge with interrupts off, because a four-byte DMA is not worth the
+/// queue.
+///
+/// Without this, that load lands in the zeroed pages the register window is
+/// backed by and every entry of the table reads zero.
+///
+/// The cartridge is copied rather than aliased because the two hold their
+/// bytes differently: the ROM is big-endian and the runtime keeps memory so
+/// that an aligned word is a word this machine can load. `do_rom_read` is what
+/// puts one into the other, and it is the same call a DMA of the whole
+/// cartridge would make.
+void map_cartridge_window(uint8_t *rdram) {
+    (void)rdram;
+    if (cartridge_bytes == 0) {
+        return;
+    }
+    // KSEG1 again: 0xB0000000 is the cartridge's physical base seen uncached,
+    // and the window mapped above already covers it.
+    constexpr gpr kCartridgeWindow = gpr(int32_t(0xB0000000));
+    constexpr size_t kWindowBytes = 0x0FC00000; // to 0xBFC00000, where the PIF is
+    const size_t bytes = std::min(cartridge_bytes, kWindowBytes);
+    recomp::do_rom_read(rdram, kCartridgeWindow, recomp::rom_base, bytes);
+}
+
 void place_sections(uint8_t *rdram, recomp_context *ctx) {
     (void)ctx;
     map_register_window(rdram);
+    map_cartridge_window(rdram);
     n64b::set_watch_memory(rdram);
+    console_memory = rdram;
     if (loaded_module == nullptr) {
         return;
     }
@@ -198,6 +257,55 @@ const char *rom_error_text(recomp::RomValidationError error) {
 
 } // namespace
 
+/// Called by the runtime when a game jumps to an address nothing was
+/// recompiled for, just before it gives up.
+///
+/// For most games that is a bug in the analysis and the address is a symptom.
+/// For a cartridge whose game is compressed there are two other cases, and
+/// both of them are ordinary.
+///
+/// The first is the expected end of an `--unpack` run: the loader has
+/// finished, the game is in memory, and this address is where it starts.
+/// Nothing in the image says so and no amount of reading the image will,
+/// because until the loader has run the code does not exist anywhere. So the
+/// console's memory goes to a file -- a derived work of the player's own
+/// cartridge in the same way the ROM is, kept beside it under the game's
+/// folder, never in the source tree and never in a title record.
+///
+/// The second is an overlay: code the game decompressed into memory it
+/// allocated, which no analysis could have reached and no record could name.
+/// That one is translated here and now, and the game carries on.
+extern "C" recomp_func_t *recomp_missing_function(int32_t addr) {
+    if (unpack_path.empty()) {
+        return n64b::recompile_at(console_memory, uint32_t(addr));
+    }
+    if (console_memory == nullptr) {
+        std::fprintf(stderr, "error: the game ended before its memory existed; nothing to "
+                             "unpack.\n");
+        return nullptr;
+    }
+
+    std::FILE *out = std::fopen(unpack_path.c_str(), "wb");
+    if (out == nullptr) {
+        std::fprintf(stderr, "error: could not write %s (%s)\n", unpack_path.c_str(),
+                     std::strerror(errno));
+        return nullptr;
+    }
+    const size_t written = std::fwrite(console_memory, 1, kRdramSizeBytes, out);
+    const bool ok = written == kRdramSizeBytes && std::fclose(out) == 0;
+    if (!ok) {
+        std::fprintf(stderr, "error: could not write all of %s\n", unpack_path.c_str());
+        return nullptr;
+    }
+
+    // The line the pipeline reads. Said on stdout, and said in one piece, so
+    // that a caller does not have to parse the runtime's chatter around it.
+    std::printf("@@unpacked entry=0x%08X image=%s size=0x%zX\n", uint32_t(addr),
+                unpack_path.c_str(), kRdramSizeBytes);
+    std::fflush(stdout);
+    return nullptr;
+}
+
 int main(int argc, char **argv) {
     Options options;
     options.config_dir = default_config_dir();
@@ -216,6 +324,7 @@ int main(int argc, char **argv) {
         else if (arg == "--config-dir") options.config_dir = next_arg();
         else if (arg == "--fullscreen") options.fullscreen = true;
         else if (arg == "--developer") options.developer = true;
+        else if (arg == "--unpack") options.unpack = next_arg();
         else if (arg == "--help" || arg == "-h") { usage(); return 0; }
         else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
@@ -227,6 +336,14 @@ int main(int argc, char **argv) {
     if (options.module.empty() || options.rom.empty()) {
         usage();
         return 2;
+    }
+    unpack_path = options.unpack;
+    {
+        // The size of what the runtime will read the cartridge out of, for the
+        // window map_cartridge_window() fills.
+        std::error_code size_error;
+        const auto size = fs::file_size(options.rom, size_error);
+        cartridge_bytes = size_error ? 0 : size_t(size);
     }
 
     std::string error;
@@ -253,6 +370,10 @@ int main(int argc, char **argv) {
     }
     n64b::init_input();
     n64b::install_trace(options.developer);
+    // Zero unless this game reaches between its overlays through the CPU's
+    // syscall exception, which the runtime has to stand in for.
+    n64b::set_syscall_handler(desc.syscall_handler_address, desc.syscall_table_address,
+                              desc.syscall_table_size);
 
     // Hand the module's section table to the runtime. From here on, a call
     // into an address the game loaded at runtime resolves through this.

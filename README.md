@@ -18,10 +18,16 @@ that carries the forks.
 runs: its title screen, its file select, Peach's letter, the castle grounds,
 Mario under the control of a pad, its music and its sound effects, and a save
 file that survives quitting. Mario Builder 64, the second cartridge, recompiles
-at the same coverage and reaches its startup screen. Everything around both
-works: a ROM is analysed, recompiled, compiled, added to the library and
-launched into a window with the renderer up. [PLAN.md](PLAN.md) has the design,
-the measured numbers, and what is still missing.
+at the same coverage and reaches its startup screen. Banjo-Tooie, the third,
+holds its game compressed and has to be run before it can be read at all — it
+now unpacks itself, hands over 9,732 functions with every internal call landing
+on a boundary, boots, runs its scheduler, dispatches through its own overlay
+system, has the runtime translate its overlays as it reaches them, and **draws
+its own world** — for about forty seconds, after which the game thread stops
+submitting frames. Everything around all three works: a ROM is analysed,
+recompiled, compiled, added to the library and launched into a window with the
+renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what
+is still missing.
 
 ## Quick start
 
@@ -145,6 +151,115 @@ ROM gets into its own code and what is left is finding its segments; without
 one, every device driver has to be identified by hand and written down. Super
 Mario 64's record is what that costs — twenty-six lines of addresses, and the
 game plays.
+
+## The cartridge that has to be run before it can be read
+
+A third title, Banjo-Tooie, is neither of those shapes. It is a sixteen-
+kilobyte loader followed by thirty-two megabytes of compressed data, and there
+is no second segment to write down, because until the loader has run the code
+does not exist anywhere — not in the cartridge, not at any offset, not in any
+form a reader can point at. Dropped in as it stood it recovered 83 functions
+out of a 32MB image and crashed a quarter of a second after Play.
+
+So the game is made to unpack itself, and then read:
+
+- one name in its record — `osPiRawStartDma`, which the loader calls directly
+  and which librecomp carried as a stub that ends the process — is enough to
+  make its cartridge reads real, and the loader then unpacks the game and jumps
+  into it;
+- `n64b-run --unpack` stops at the first address the runtime cannot find,
+  writes the console's memory out, and says where the game was going;
+- `n64rip --unpacked` takes the segments a record names out of that image and
+  splices them onto the end of the ROM the recompiler reads, where the sweep
+  and the signature database treat them like anything else in the cartridge;
+- and the pipeline loops, because a game unpacks in stages and each stage only
+  appears once the one before it is running.
+
+Banjo-Tooie takes two rounds — the loader reveals the core, the core reveals
+the main segment — and comes out at **9,732 functions with 13,802 of 13,802
+internal calls landing on a recovered boundary**.
+
+The memory image is a derived work of the player's own dump, exactly as the
+library's copy of the ROM is, and it lives beside it. No part of it is ever
+written into a title record.
+
+## A game that calls itself through the exception handler
+
+Getting Banjo-Tooie past the black window took three faults that had nothing to
+do with the analysis and one that was a shape nobody had met.
+
+**It thought the reset button was held down.** The status register the runtime
+reports was zero, and a game reads that register to find out what the console
+is doing rather than only to change it: Banjo-Tooie's retrace thread checks
+SR_IBIT5, the pre-NMI bit, on every frame. libultra masks that bit off when
+RESET is pressed, so a game that sees it clear knows it is being reset — and
+Banjo-Tooie's answer is to stop the rumble motors, put the video interface back
+to a plain mode, and spin until the NMI arrives. That fired on the first
+retrace, which is exactly a game that configures its video and then draws
+nothing forever. The runtime now reports the interrupt mask a running console
+has.
+
+**Its trigonometry returned to nowhere.** Four functions keep the caller's
+return address in another register so they can call a shared body and still
+come back: `or $a1, $ra, $zero; jal ...; jr $a1`. A `jr` through anything but
+`$ra` was an indirect tail call, which looks the register up in the
+address-to-function map — and nothing writes `$ra` in recompiled code, so the
+lookup failed on zero. The recompiler now reads a `jr` through a register that
+can only hold this function's return address as what it is: a return.
+
+**It reads its cartridge with a load.** The parallel interface is not only a
+DMA engine — the cartridge is mapped, and a load from `0xB0000000` plus an
+offset reads a word of it. libultra never does that, so no decompilation-based
+project needs it; Banjo-Tooie's loader does, one word at a time with interrupts
+off, because a four-byte DMA is not worth the queue. The runtime now puts the
+cartridge where the console has it.
+
+**And every call between its overlays goes through the CPU's syscall
+exception.** Thirty-two megabytes do not fit in eight, so Banjo-Tooie holds its
+code in 886 overlays and links them with a table of 4,234 two-instruction
+stubs: `syscall <n>` and a word saying which entry point. The exception goes to
+the game's own handler, which loads the overlay, assembles a thunk, rewrites
+the stub into a jump to it and returns to the stub to run it.
+
+Nothing in the image can be followed into any of that — the stubs are reached
+only through pointer tables in the game's own data, and the handler only
+through the exception vector — so a record names the table and the handler, and
+the analyser checks the range by shape before it uses it: every eight bytes of
+a stub table begins with a `syscall`, and nothing a compiler emits ever does.
+The 3,691 stubs that were not functions before are functions now. The runtime
+stands in for the exception, and reads the rewritten stub and the thunk rather
+than executing them, because a static recompilation cannot run code a game
+wrote after it was compiled.
+
+**And past that, its code is in no cartridge at all.** The game reads its
+overlay directory straight off the cartridge, allocates a buffer, decompresses
+an overlay into it and calls the code there. `[[unpacked]]` cannot answer that
+one: there are 886 overlays, they are freed, and their addresses are reused, so
+no fixed set of sections describes them.
+
+So the runtime translates a function the first time the game jumps to it, with
+the recompiler that is already vendored — reading the instructions out of the
+console's memory rather than out of a file, recovering where the function ends
+the way the analyser does on a cartridge, and keeping the body it was made from
+so that an overlay which has been freed and replaced is never run from the old
+translation. Generated code carries no symbol, so a backtrace through it names
+each frame by the address it was translated from.
+
+**And its text is locked to the boot chip.** Banjo-Tooie stores its text
+scrambled and exclusive-ors it with a fourteen-byte key — and the key comes
+from the cartridge's CIC. Bit one of the last byte of the serial interface's
+sixty-four-byte block is "ask the boot chip", and a CIC-6105 answers a
+challenge with a response nothing else can produce. The runtime used to
+complete that transfer and leave the block alone, so the game unscrambled its
+text with its own question, read the noise's first halfword as a size to
+allocate, and failed. The PIF's memory round-trips now, and the challenge is
+answered.
+
+**It draws.** Banjo-Tooie renders its own world — textured geometry, a rock
+face, grass, a stone path — and runs its game loop for about forty seconds:
+781 display lists, 48,715 calls through its overlay system, 434 functions
+translated while it ran and none refused. Then the game thread stops submitting
+frames while every other thread carries on, which is the next thing to find.
 
 **So: a game that plays is not every game, and some ROMs will not boot at all.**
 Everything the analyser knows it learned from two cartridges, and the next one

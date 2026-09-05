@@ -814,13 +814,19 @@ bool needs_stub(const Rom &rom, const SectionInfo &section, const FunctionRange 
         const uint32_t rs = (word >> 21) & 0x1F;
         const uint32_t rd = (word >> 11) & 0x1F;
         constexpr uint32_t kCop0Status = 12;
-        // Reading the status register is harmless -- the runtime keeps one per
-        // context and hands it back. Writing it is not: the runtime models the
-        // FR bit, which decides how the odd float registers are addressed, and
-        // refuses every other bit rather than pretend. A function that writes
-        // Status is turning interrupts on or off, which is a hardware routine
-        // by definition.
-        if (rs == 0x00 /* mfc0 */ && rd == kCop0Status) {
+        // The status register is modelled, so a function that only touches
+        // that one runs. Reads hand back what the runtime holds, with the
+        // interrupt mask a running console has; writes keep the FR bit, which
+        // decides how the odd float registers are addressed, and accept and
+        // drop the interrupt bits, because there are no interrupts here to
+        // enable or mask.
+        //
+        // That is what a function turning interrupts off around a few
+        // instructions is doing, and stubbing one loses the few instructions
+        // rather than the interrupts. Every other coprocessor 0 register --
+        // Cause, EPC, the TLB -- still stubs the function, because the runtime
+        // has nothing to say for those.
+        if ((rs == 0x00 /* mfc0 */ || rs == 0x04 /* mtc0 */) && rd == kCop0Status) {
             continue;
         }
         return true;
@@ -1049,6 +1055,141 @@ void split_at_cross_section_calls(const Rom &rom, Analysis &analysis) {
             }
         }
     }
+}
+
+/// Look again for branches that escape, now that the split has run.
+///
+/// `recover_functions` already asks this of every function it recovers, but it
+/// works one section at a time and so cannot see a call arriving from another.
+/// `split_at_cross_section_calls` adds those boundaries afterwards, and a
+/// boundary added there can cut a function in two at exactly the place a
+/// branch crosses -- which is the case the first check exists for, arriving
+/// after it has run. The function then reaches the recompiler with a branch
+/// out of it, and the recompiler refuses the whole build over it.
+///
+/// Banjo-Tooie has three, all the same shape: a float helper with two entry
+/// points sharing one body, where the second entry is called fifty-five times
+/// from the segment the game unpacks second and the first is called from
+/// nowhere at all. Splitting at the second is right -- a `jal` names the first
+/// instruction of a function -- and what it leaves above the split is five
+/// instructions that branch over the body into the middle of it.
+void restub_after_splitting(const Rom &rom, Analysis &analysis) {
+    for (SectionInfo &section : analysis.sections) {
+        std::set<uint32_t> starts;
+        for (const FunctionRange &function : section.functions) {
+            starts.insert(function.vram);
+        }
+        // The section was narrowed to its code once the sweep finished, so its
+        // end is the end of the text.
+        const uint32_t text_end = section.vram + section.size;
+        for (FunctionRange &function : section.functions) {
+            // A named function is the runtime's own, and a stub is already
+            // as stubbed as it is going to get.
+            if (function.stub || !function.name.empty()) {
+                continue;
+            }
+            if (branches_escape(rom, section, starts, text_end, function)) {
+                function.stub = true;
+                analysis.report.stubbed_unstructured++;
+            }
+        }
+    }
+}
+
+/// Cut a game's syscall stub table into the two-instruction functions it is.
+///
+/// A game that dispatches through the CPU's syscall exception -- see
+/// SyscallDispatch -- reaches every one of these stubs through a table of
+/// pointers in its own data, so no `jal` names one and the sweep has no reason
+/// to end a function at one. What it produces instead is a handful of long
+/// functions made of stubs, cut only where something else happened to point,
+/// and every call to a stub inside one of those is an address the runtime
+/// cannot find.
+///
+/// Banjo-Tooie's table is 4,234 stubs and the sweep put boundaries on 543 of
+/// them. The other 3,691 are functions the game calls and this analysis did
+/// not have.
+///
+/// The record's range is checked by shape before it is used, the same way a
+/// recorded microcode offset is: every eight bytes of a stub table begins with
+/// a `syscall`, and nothing a compiler emits contains one at all, so the real
+/// table reads every entry and anything else reads almost none.
+void cut_syscall_stubs(const Rom &rom, Analysis &analysis, const TitleRecord &record) {
+    const SyscallDispatch &dispatch = record.syscall;
+    if (!dispatch.present) {
+        return;
+    }
+
+    SectionInfo *section = nullptr;
+    for (SectionInfo &candidate : analysis.sections) {
+        const uint64_t end = uint64_t(candidate.vram) + candidate.size;
+        if (dispatch.stubs >= candidate.vram && uint64_t(dispatch.stubs) + dispatch.size <= end) {
+            section = &candidate;
+            break;
+        }
+    }
+    if (section == nullptr) {
+        analysis.report.notes.push_back(
+            "record: the syscall stub table is not inside any section that was recovered, so it "
+            "was left alone");
+        return;
+    }
+
+    const uint32_t table_end = dispatch.stubs + dispatch.size;
+    const size_t entries = dispatch.size / 8;
+    size_t syscalls = 0;
+    for (uint32_t at = dispatch.stubs; at < table_end; at += 8) {
+        if ((rom.word(section->rom + (at - section->vram)) & 0xFC00003Fu) == 0x0000000Cu) {
+            syscalls++;
+        }
+    }
+    if (syscalls != entries) {
+        analysis.report.notes.push_back(
+            "record: " + std::to_string(syscalls) + " of " + std::to_string(entries) +
+            " entries at the recorded syscall stub table begin with a syscall, so it is not the "
+            "table and was left alone");
+        return;
+    }
+
+    // What the sweep made of the table is replaced outright. A function that
+    // began above it keeps the part that is really code, and one that ran past
+    // the end of it becomes a function of its own there -- which is what it
+    // always was, since the stub before it does not fall through.
+    std::vector<FunctionRange> rebuilt;
+    rebuilt.reserve(section->functions.size() + entries);
+    for (const FunctionRange &function : section->functions) {
+        const uint32_t end = function.vram + function.size;
+        if (end <= dispatch.stubs || function.vram >= table_end) {
+            rebuilt.push_back(function);
+            continue;
+        }
+        if (function.vram < dispatch.stubs) {
+            FunctionRange head = function;
+            head.size = dispatch.stubs - function.vram;
+            rebuilt.push_back(head);
+        }
+        if (end > table_end) {
+            FunctionRange tail;
+            tail.vram = table_end;
+            tail.size = end - table_end;
+            rebuilt.push_back(tail);
+        }
+    }
+    for (uint32_t at = dispatch.stubs; at < table_end; at += 8) {
+        FunctionRange stub;
+        stub.vram = at;
+        stub.size = 8;
+        rebuilt.push_back(stub);
+    }
+    std::sort(rebuilt.begin(), rebuilt.end(),
+              [](const FunctionRange &a, const FunctionRange &b) { return a.vram < b.vram; });
+
+    analysis.report.functions_found += rebuilt.size() - section->functions.size();
+    analysis.report.syscall_stubs = entries;
+    section->functions = std::move(rebuilt);
+    analysis.syscall_handler = dispatch.handler;
+    analysis.syscall_stubs = dispatch.stubs;
+    analysis.syscall_stubs_size = dispatch.size;
 }
 
 /// Score every call in the image, once every section is known.
@@ -1543,6 +1684,8 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
 
         adopt_microcode(rom, analysis, *record);
 
+        cut_syscall_stubs(rom, analysis, *record);
+
         analysis.report.notes.push_back("record: " + record->path);
         for (const std::string &note : record->notes) {
             analysis.report.notes.push_back("record: " + note);
@@ -1550,6 +1693,7 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
     }
 
     split_at_cross_section_calls(rom, analysis);
+    restub_after_splitting(rom, analysis);
     score_calls(rom, analysis);
     analysis.save_type_evidence = detect_save_evidence(analysis);
     if (record != nullptr && !record->save_type.empty()) {

@@ -29,6 +29,7 @@ add_executable(n64b-run
     src/input.cpp
     src/callbacks.cpp
     src/hooks.cpp
+    src/overlays.cpp
     src/trace.cpp
 )
 
@@ -46,6 +47,11 @@ target_include_directories(n64b-run PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/thirdparty/sse2neon"
     # librecomp does not export where recomp.h lives, so name them here.
     "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/N64Recomp/include"
+    # The recompiler's own headers reach for rabbitizer, which is vendored
+    # inside it and not exported either. overlays.cpp runs the recompiler while
+    # a game is running, which is what needs them.
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/N64Recomp/lib/rabbitizer/cplusplus/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/N64Recomp/lib/rabbitizer/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/librecomp/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/N64ModernRuntime/ultramodern/include"
     ${SDL2_INCLUDE_DIRS}
@@ -54,6 +60,10 @@ target_include_directories(n64b-run PRIVATE
 target_link_libraries(n64b-run PRIVATE
     modernreality_abi
     librecomp
+    # The recompiler, for the code a game decompresses into memory it
+    # allocated: see host/src/overlays.cpp.
+    N64Recomp
+    LiveRecomp
     ultramodern
     # Also force-loaded below. Named here as well so that the link depends on
     # it: without that, adding a libultra helper to it leaves the host linked

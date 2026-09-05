@@ -1,0 +1,21 @@
+diff --git a/src/recompilation.cpp b/src/recompilation.cpp
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -713,7 +713,16 @@
+             // }
+             // ```
+             // FIXME: how to deal with static functions?
+-            else if (context.functions_by_vram.find(branch_target) != context.functions_by_vram.end()) {
++            //
++            // A tail call to an address this context knows nothing about is
++            // the same case as a `jal` to one, and gets the same answer: from
++            // an elf it means the symbol data is wrong and stopping is right,
++            // and from a bare ROM -- or from code the runtime is translating
++            // out of memory a game decompressed into -- it means the callee is
++            // somewhere the analysis never saw, which is exactly what the
++            // runtime's lookup is for.
++            else if (context.functions_by_vram.find(branch_target) != context.functions_by_vram.end() ||
++                     context.lookup_unresolved_function_calls) {
+                 fmt::print("[Info] Tail call in {} to 0x{:08X}\n", func.name, branch_target);
+                 if (!print_func_call_by_address(branch_target, true)) {
+                     return false;

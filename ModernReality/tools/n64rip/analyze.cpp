@@ -475,6 +475,45 @@ void name_from_signatures(const Rom &rom, const SectionInfo &section,
         }
         i += best->words.size() - 1;
     }
+
+    // What the exact pass could not name, and what it nearly was.
+    //
+    // Only at boundaries the walk already recovered, and only against the
+    // signatures that share this function's first instructions, so this costs
+    // one comparison per candidate per function rather than a search.
+    for (auto it = out.functions.begin(); it != out.functions.end(); ++it) {
+        const uint32_t vram = it->first;
+        if (out.names.count(vram) != 0 || out.known_names.count(vram) != 0) {
+            continue;
+        }
+        if (vram < section.vram || vram >= out.text_end) {
+            continue;
+        }
+        const size_t at = (vram - section.vram) / 4;
+        const size_t length = (std::min(it->second, out.text_end) - vram) / 4;
+        if (length < 4) {
+            continue;
+        }
+        const n64sig::Signature *closest = nullptr;
+        double best_share = 0.0;
+        for (const n64sig::Signature *candidate :
+             signatures.candidates(code.data() + at, words - at)) {
+            const double share =
+                n64sig::Database::resemblance(*candidate, code.data() + at, words - at, length);
+            if (share > best_share) {
+                best_share = share;
+                closest = candidate;
+            }
+        }
+        // High enough that a coincidence of prologues does not reach it, low
+        // enough that a revision's worth of differences still does.
+        constexpr double kWorthSaying = 0.70;
+        if (closest != nullptr && best_share >= kWorthSaying) {
+            report.resemblances.push_back({vram, closest->name, best_share,
+                                           provides != nullptr &&
+                                               provides->count(closest->name) != 0});
+        }
+    }
 }
 
 /// Make every function contain its own branches.
@@ -1791,6 +1830,22 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
                   [](const SectionInfo &a, const SectionInfo &b) { return a.rom < b.rom; });
 
         apply_function_records(analysis, *record);
+
+        // A resemblance is a suggestion, and a record that already names the
+        // function has taken it. Saying it again turns a worklist into a list
+        // of things somebody has to check off twice.
+        analysis.report.resemblances.erase(
+            std::remove_if(analysis.report.resemblances.begin(),
+                           analysis.report.resemblances.end(),
+                           [&](const AnalysisReport::Resemblance &near) {
+                               for (const FunctionRange &named : record->functions) {
+                                   if (named.vram == near.vram && !named.name.empty()) {
+                                       return true;
+                                   }
+                               }
+                               return false;
+                           }),
+            analysis.report.resemblances.end());
 
         adopt_microcode(rom, analysis, *record);
 

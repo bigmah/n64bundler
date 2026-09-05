@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include <cstdio>
+#include <iomanip>
 #include <sstream>
 #include <vector>
 
@@ -268,6 +269,25 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
         }
         for (size_t i = 0; i < stubbed.size(); i++) {
             out << "    " << quote(stubbed[i]) << (i + 1 < stubbed.size() ? "," : "") << "\n";
+        }
+    }
+    out << "  ],\n"
+        << "  \"resembles\": [\n";
+    // A function that is nearly a libultra function and not quite it. The
+    // database masks relocations already, so a near miss is not a build
+    // difference in the addresses -- it is a different revision of libultra,
+    // where the function grew a check or lost one. Nothing can name these
+    // automatically, because "nearly" is not a match; what they are for is a
+    // person deciding, one line at a time, that 0x80030170 really is
+    // osEepromProbe. `implemented` is whether naming it would change anything:
+    // if the runtime has no implementation, the name is only a label.
+    {
+        const std::vector<AnalysisReport::Resemblance> &near = analysis.report.resemblances;
+        for (size_t i = 0; i < near.size(); i++) {
+            out << "    { \"vram\": " << quote(hex(near[i].vram)) << ", \"name\": "
+                << quote(near[i].name) << ", \"share\": " << std::fixed << std::setprecision(2)
+                << near[i].share << ", \"implemented\": " << (near[i].implemented ? "true" : "false")
+                << " }" << (i + 1 < near.size() ? "," : "") << "\n";
         }
     }
     out << "  ],\n"

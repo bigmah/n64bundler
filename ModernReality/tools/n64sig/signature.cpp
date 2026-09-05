@@ -104,6 +104,30 @@ bool Database::matches(const Signature &signature, const uint32_t *code, size_t 
     return true;
 }
 
+double Database::resemblance(const Signature &signature, const uint32_t *code, size_t available,
+                             size_t function_words) {
+    const size_t theirs = signature.words.size();
+    const size_t mine = std::min(function_words, available);
+    if (theirs == 0 || mine == 0) {
+        return 0.0;
+    }
+    // Lengths that are not in the same neighbourhood are not the same
+    // function, whatever their instructions do; comparing them would fill the
+    // report with a long routine that happens to start like a short one.
+    const size_t longer = std::max(theirs, mine);
+    const size_t shorter = std::min(theirs, mine);
+    if (shorter * 4 < longer * 3) {
+        return 0.0;
+    }
+    size_t agree = 0;
+    for (size_t i = 0; i < shorter; i++) {
+        if ((code[i] & signature.masks[i]) == signature.words[i]) {
+            agree++;
+        }
+    }
+    return double(agree) / double(longer);
+}
+
 bool Database::save(const std::string &path, std::string &error) const {
     std::ofstream out(path, std::ios::binary);
     if (!out) {

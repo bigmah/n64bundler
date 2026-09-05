@@ -15,6 +15,8 @@
 
 #include "n64rip.hpp"
 
+#include <algorithm>
+
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -134,6 +136,32 @@ void print_analysis(const n64rip::Analysis &analysis) {
     if (report.merged_boundaries > 0) {
         std::printf("%zu boundaries merged where a branch crossed them\n",
                     report.merged_boundaries);
+    }
+    if (!report.resemblances.empty()) {
+        size_t worth = 0;
+        for (const auto &near : report.resemblances) {
+            worth += near.implemented ? 1 : 0;
+        }
+        std::printf("%zu functions nearly match a libultra signature without matching it; the "
+                    "runtime implements %zu of the functions they resemble.\n",
+                    report.resemblances.size(), worth);
+        std::printf("    Each is a line a title record could carry. The closest ten:\n");
+        std::vector<const n64rip::AnalysisReport::Resemblance *> sorted;
+        for (const auto &near : report.resemblances) {
+            sorted.push_back(&near);
+        }
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const n64rip::AnalysisReport::Resemblance *a, const n64rip::AnalysisReport::Resemblance *b) {
+                      if (a->implemented != b->implemented) {
+                          return a->implemented;
+                      }
+                      return a->share > b->share;
+                  });
+        for (size_t i = 0; i < sorted.size() && i < 10; i++) {
+            std::printf("      0x%08X is %.0f%% of %s%s\n", sorted[i]->vram,
+                        sorted[i]->share * 100.0, sorted[i]->name.c_str(),
+                        sorted[i]->implemented ? "" : " (which the runtime does not implement)");
+        }
     }
     if (report.extended_over_shared_tail > 0) {
         std::printf("%zu functions given back a body a later entry point had cut them off "

@@ -65,6 +65,20 @@ public:
     /// Does `signature` match the words at `code`, in full?
     static bool matches(const Signature &signature, const uint32_t *code, size_t available);
 
+    /// How much of `signature` the code at `code` agrees with, from 0 to 1,
+    /// where a function of a different length is penalised by the difference.
+    ///
+    /// An exact match names a function; this says what a function nearly is.
+    /// libultra shipped in revisions, and the same routine differs between two
+    /// of them by a handful of instructions -- a register allocated
+    /// differently, a branch the compiler inverted -- which is enough to fail
+    /// a match and not nearly enough to hide what the function is. Somebody
+    /// reading "0x80030170 is 87% of osEepromProbe" writes one line in a title
+    /// record and gets the runtime's implementation; without it they have an
+    /// unnamed function among nine thousand others.
+    static double resemblance(const Signature &signature, const uint32_t *code, size_t available,
+                              size_t function_words);
+
     bool load(const std::string &path, std::string &error);
     bool save(const std::string &path, std::string &error) const;
 

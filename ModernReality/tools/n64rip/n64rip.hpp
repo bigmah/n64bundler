@@ -194,6 +194,17 @@ struct AnalysisReport {
     /// body -- libultra's exception preamble is the one every game has -- and
     /// they do not divide into functions at all.
     size_t stubbed_unstructured = 0;
+    /// Functions that nearly match a libultra signature without matching it.
+    /// Each one is a routine the runtime could implement, in a revision of
+    /// libultra this database does not carry -- a name, an address, and how
+    /// much of it agreed, which is a line somebody can put in a title record.
+    struct Resemblance {
+        uint32_t vram = 0;
+        std::string name;
+        double share = 0.0;
+        bool implemented = false;
+    };
+    std::vector<Resemblance> resemblances;
     /// Functions given their body back after a boundary cut them off from it.
     /// Each one is an entry point into a block that a later entry point also
     /// starts in, so the two overlap and each carries its own copy of the

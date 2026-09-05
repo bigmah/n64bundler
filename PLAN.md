@@ -979,8 +979,20 @@ guessed at, and every address here is one to check again:
   `func_800EC800` whether to register it. That reads bit 0 of the halfword at
   0x80132EE8, twenty-four bytes into a forty-eight byte descriptor whose other
   fields are filled in and sensible: a back pointer to the level entry at
-  0x80193AE0, a behaviour function at 0x8008ED70, an id of 0x0D6E. The flag is
-  zero, and nothing writes it in thirty seconds of watching.
+  0x80193AE0, a behaviour function at 0x8008ED70, an id of 0x0D6E. Slot zero of
+  a two hundred entry pool at 0x80132ED0, allocated, zeroed and set up by
+  `func_800EBED4`, which fills +18, +19, +36 and +42 and leaves +20 and +24 to
+  whatever activates it. Both are zero, and nothing writes either in thirty
+  seconds of watching the whole descriptor.
+- **And the same flag is the gate everywhere.** `func_8011458C`, which runs
+  once a frame over the same list, checks the same two halfwords at +24 and
+  +20 and gives up on the same entry.
+- **What would set them is only ever reached from an overlay.** `func_800EC360`
+  writes +20, `func_800EC5C0` writes +24, and neither runs. Climbing their
+  callers ends at `func_80107C2C`, which nothing in any recovered section calls
+  at all: it is reached from code the game decompresses, so the decision not to
+  enable this actor is being taken in an overlay. That is where the next
+  session starts, and `N64B_OVERLAY_DUMP` is how to read one.
 
 So the game runs its opening cutscene level with an empty world: the terrain
 draws, the water moves, the music plays and loops on a forty-eight second

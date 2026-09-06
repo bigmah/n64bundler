@@ -1259,9 +1259,44 @@ measured:
 
 So the frontier is one question, and it is a much narrower one than the
 picture it came from: **the objects this runtime's camera pass iterates carry
-no model identifier, where the console's carry one.** That is the same shape
-as the empty world of a hundred commits ago -- an object that is there and is
-not furnished -- and it is where the next session starts. What has been ruled out on the way there, so that the next look
+no model identifier, where the console's carry one.** At the same point in the
+game the console's camera pass runs on eighteen objects and this runtime's on
+three.
+
+Asking the census the same question over the whole segment says how wide that
+is. Twenty-five seconds each side, the stub table excluded: **1,456 functions
+the console entered and this runtime never did, and one the other way.** A
+strict subset is the signature of a game deciding not to do things rather than
+of anything being corrupted, and the gates are all of the same shape --
+
+- `func_800DE498` reads a scene-graph node's `+0x18` and skips its whole block
+  when it is zero, which takes both the camera branch (`func_800AE160`) and
+  the branch beside it (`func_800ADCD0`) out at once; it runs 3,274 times here
+  and neither branch ever runs.
+- `func_800EA628` runs 4,270 times here and reaches none of the seven
+  functions it calls.
+- `func_800D674C` runs 5,205 times here and reaches neither of its two, which
+  are guarded on an object's `+0x2C` being non-zero.
+
+-- and the values behind those gates come from the game's data rather than
+from any instruction: nothing in the image ORs the bits in.
+
+What has been ruled out at this level, so the next look does not start here:
+
+- **It is not time starvation.** Running the vertical interrupt at fifteen
+  hertz gives the game four times the wall clock per frame and changes the
+  projection not at all.
+- **It is not the asset table.** The list of loaded cartridge files at
+  `0x8012B800` has nineteen entries on the console and seventeen here, and
+  eleven of the offsets are the same on both -- so files load, and different
+  ones are asked for.
+- **It is not memory pressure.** The allocator runs 156 times here in
+  twenty-two seconds against 160 there.
+- **It cannot be aligned by frame.** This runtime's boot spends about ten
+  seconds live-recompiling while the game runs, so the two consoles are never
+  at the same place at the same vertical interrupt, and a diff of the game's
+  own memory at any early pair of frames is already a hundred thousand words
+  apart. Any comparison from here has to be aligned on the game's own state. What has been ruled out on the way there, so that the next look
 does not start here:
 
 - **The table is right.** Every handler address at `0x8012306C` is identical

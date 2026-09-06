@@ -462,7 +462,18 @@ int main(int argc, char **argv) {
                                             : ultramodern::renderer::WindowMode::Windowed;
     graphics.hr_option = ultramodern::renderer::HUDRatioMode::Original;
     graphics.api_option = ultramodern::renderer::GraphicsApi::Metal;
-    graphics.ar_option = ultramodern::renderer::AspectRatio::Expand;
+    // The game's own aspect ratio, pillarboxed, and deliberately not the
+    // window's.
+    //
+    // Expanding to the window is what every widescreen hack does, and it works
+    // by widening the projection -- which shows more of the world than the game
+    // ever meant to draw. An N64 game culls its scenery against a four-by-three
+    // frustum and submits nothing outside it, so what fills the extra width is
+    // not more world but the edge of the world: on Banjo-Tooie's title screen
+    // the cliffs stop in a hard vertical line and the grass above them floats
+    // over nothing. A game that was drawn for four by three is shown in four by
+    // three.
+    graphics.ar_option = ultramodern::renderer::AspectRatio::Original;
     graphics.msaa_option = ultramodern::renderer::Antialiasing::MSAA2X;
     // The N64 ran at 60Hz whatever the display did; matching the display is
     // what makes a 120Hz panel look right rather than judder.

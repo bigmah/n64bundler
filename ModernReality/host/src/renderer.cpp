@@ -198,6 +198,19 @@ public:
             return;
         }
 
+        // Again, because `setup` read RT64's own configuration file over the
+        // top of what we just asked for.
+        //
+        // `useConfigurationFile` is on so that RT64's developer tools have
+        // somewhere to keep their state, and the first thing `setup` does is
+        // load that file into `userConfig` -- so a machine that has ever run
+        // this once is a machine where the host's settings are read, replaced,
+        // and never used. The window's aspect ratio, its antialiasing and its
+        // refresh rate all came from a file written months ago rather than from
+        // the game being launched. The first call still has to happen, because
+        // `setup` picks a graphics API and a sample count out of the config on
+        // its way through; this one is what makes those choices stick.
+        apply_config(ultramodern::renderer::get_graphics_config());
         app_->updateUserConfig(true);
     }
 

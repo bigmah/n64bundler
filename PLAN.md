@@ -1388,6 +1388,31 @@ anything is a game that has stopped advancing. So the free-roam match is an
 exact test of what is drawn and no test at all of when. What makes a cutscene
 run at a different pace here is not measured, and is the next thing to look at.
 
+**And one thing that looked right and was not.** Everything above was compared
+against a console rendering four by three, and this runtime was rendering
+sixteen by nine: `main.cpp` asked for `AspectRatio::Expand`, which fills the
+window by widening the projection. A game that culls its scenery against a four
+by three frustum submits nothing outside it, so the extra width is not more
+world -- it is the edge of the world, and on Banjo-Tooie's title screen the
+cliffs stop in a hard vertical line with the grass above them floating over
+nothing. Measured off the window, the picture was 1.78 wide where the game
+draws 1.33. It is `Original` now, pillarboxed, which is what an emulator shows
+and what the reference console was being compared against all along.
+
+That one took a person looking at it to find. Every frame in the list above was
+compared against the reference and matched, because the comparison crops both to
+the game's own image and never looked at what was beside it -- the artefact was
+outside the picture being compared, in the part of the window the game never
+asked for.
+
+Underneath it was a second bug that would have hidden any fix: RT64's `setup()`
+calls `loadConfiguration()`, which reads `rt64.json` straight over `userConfig`
+-- so the host set its aspect ratio, its antialiasing and its refresh rate, and
+`setup` replaced all three with whatever a file written months ago said. The
+host's configuration is applied again after `setup` returns now. The first call
+still has to happen, because `setup` picks a graphics API and a sample count out
+of the config on its way through; the second is what makes those choices stick.
+
 Two things that looked like bugs and were not is the point. A picture of a
 low-polygon game is full of things that look like a renderer having a bad day,
 and the only way to tell is to have the other console draw the same frame.

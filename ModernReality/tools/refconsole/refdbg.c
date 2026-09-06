@@ -46,6 +46,13 @@ static const char *env_or(const char *name, const char *fallback) {
 static const char *core_path(void) {
     return env_or("M64P_CORE", "./libmupen64plus.dylib");
 }
+static const char *gfx_path(void) {
+    // The core's own stub video plugin never finishes a display list, so a game
+    // that waits on the display processor stops a frame or two in. That is fine
+    // for a question about boot and useless for a question about play, so a real
+    // one can be named here and is attached when it is.
+    return getenv("M64P_GFX");
+}
 static const char *rsp_path(void) {
     return env_or("M64P_RSP", "/opt/homebrew/lib/mupen64plus/mupen64plus-rsp-hle.dylib");
 }
@@ -223,6 +230,17 @@ int main(int argc, char **argv) {
     void *core = dlopen(core_path(), RTLD_NOW);
     rsp_startup(core, NULL, debug_cb);
 
+    void *gfx = NULL;
+    if (gfx_path() != NULL) {
+        gfx = dlopen(gfx_path(), RTLD_NOW);
+        if (gfx == NULL) { fprintf(stderr, "gfx: %s\n", dlerror()); return 1; }
+        m64p_error (*gfx_startup)(m64p_dynlib_handle, void *, void (*)(void *, int, const char *)) =
+            dlsym(gfx, "PluginStartup");
+        if (gfx_startup(core, NULL, debug_cb) != M64ERR_SUCCESS) {
+            fprintf(stderr, "gfx startup failed\n"); return 1;
+        }
+    }
+
     FILE *f = fopen(rom_path, "rb");
     if (f == NULL) { perror("rom"); return 1; }
     fseek(f, 0, SEEK_END); long size = ftell(f); fseek(f, 0, SEEK_SET);
@@ -231,6 +249,7 @@ int main(int argc, char **argv) {
     fclose(f);
     if (CoreDoCommand(M64CMD_ROM_OPEN, (int)size, rom) != M64ERR_SUCCESS) return 1;
     free(rom);
+    if (gfx != NULL) CoreAttachPlugin(M64PLUGIN_GFX, gfx);
     CoreAttachPlugin(M64PLUGIN_RSP, rsp);
 
     if (DebugSetCallbacks(dbg_init, dbg_update, dbg_vi) != M64ERR_SUCCESS) {

@@ -21,11 +21,13 @@ file that survives quitting. Mario Builder 64, the second cartridge, recompiles
 at the same coverage and reaches its startup screen. Banjo-Tooie, the third,
 holds its game compressed and has to be run before it can be read at all — it
 unpacks itself, hands over 9,732 functions with every internal call landing on
-a boundary, and then **plays**: the opening cutscene over Spiral Mountain with
+a boundary, and then **runs**: the opening cutscene over Spiral Mountain with
 its text cards and its talking, the title screen, the file select in Banjo's
 house, and a new game from there into the scene indoors with the characters
 and the dialogue and the HUD. Left alone it runs its attract mode round six
-worlds and comes back. Everything around all three works: a ROM is analysed,
+worlds and comes back. It is not yet playable, because the world is drawn
+through a lens ten and a half times too wide -- one handler that writes the
+camera's matrix is never dispatched, and PLAN.md has the measurement. Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what
 is still missing.

@@ -7,9 +7,8 @@ becomes "what does a console do instead". Then there is nothing to compare
 against, and the answer has to be reasoned out of the game's own code one
 instruction at a time.
 
-These two programs are the comparison. They drive `mupen64plus`'s core with
-no video, no audio and no input — the core runs the cartridge with its own
-stub plugins — and give a script the things a debugger gives a person:
+These programs are the comparison. They drive `mupen64plus`'s core and give a
+script the things a debugger gives a person:
 
 - `refrun <rom> <out-prefix> <seconds>...` writes the console's eight
   megabytes of memory at each of those times. Two of those and two of this
@@ -30,10 +29,31 @@ stub plugins — and give a script the things a debugger gives a person:
   - `-k <n>` skip the first `n` hits, `-n <n>` stop reporting after `n`,
     `-D <path>` write memory out at the hit, `-t <secs>` how long to run.
 
-Both of them found the thing they were built for: Banjo-Tooie and this
-runtime load the same eighty-one overlays in the same order, and then the
-console loads twelve more. Walking back from that reaches eight instructions
-that read two words the boot ROM left in memory. PLAN.md has the rest.
+  `M64P_GFX` names a real video plugin, and with one attached refdbg follows a
+  game as long as you like rather than stopping a frame or two in. Without it
+  the core's stub video never finishes a display list, which is fine for a
+  question about boot and useless for a question about play.
+- `refshot <rom> <shots-dir> <frame>...` takes a screenshot at each of those
+  *frames*, with a real video plugin, by pausing the core and advancing it one
+  vertical interrupt at a time. Frames rather than seconds is the whole point:
+  a cached interpreter and a pile of compiled code do not reach the same
+  moment at the same time, and `n64b-run`'s `N64B_SCREENSHOT_AFTER` counts the
+  same interrupts. `REFSHOT_RAM=<prefix>` writes the console's memory at each
+  of them too, so a picture and the state behind it come out together, and
+  `N64B_INPUT` drives the pad in exactly the spelling `n64b-run` uses.
+- `n64dl.py <image.bin> <address>` reads a display list back out of one of
+  those memory images — counted by kind, or `--trace` for every command in
+  order, or `--matrix` for the fixed point matrix at an address. Two of those,
+  one from each console, is how "the picture is wrong" becomes "they agree for
+  five hundred and seven commands and then do not".
+
+Each of them found the thing it was built for. `refrun` and `refdbg`: Banjo-Tooie
+and this runtime load the same eighty-one overlays in the same order, and then
+the console loads twelve more, which walks back to eight instructions reading
+two words the boot ROM left in memory. `refshot` and `n64dl.py`: Banjo-Tooie's
+world is drawn through a projection ten and a half times too wide here, and
+the two consoles' display lists are identical for five hundred and seven
+commands before they part. PLAN.md has the rest.
 
 ## Building
 
@@ -47,11 +67,15 @@ The core has to be one built with its debugger, which no package ships:
       make all DEBUGGER=1 OSD=0 NEW_DYNAREC=0 -j 10 \
         STRINGS=/opt/homebrew/opt/binutils/bin/strings
 
-Then either program, against that core:
+Then any of them, against that core:
 
     clang -O2 -o refdbg refdbg.c -I/opt/homebrew/include \
       -L<core-dir> -lmupen64plus -Wl,-rpath,<core-dir>
     M64P_CORE=<core-dir>/libmupen64plus.dylib ./refdbg game.z64 -e 0x80081798
+
+The core's own install name has no directory in it, so a program linked
+against it finds it beside itself or through `DYLD_LIBRARY_PATH`; copying the
+dylib next to the binary is the shortest way.
 
 `M64P_CORE` must name the same file the program is linked against, or the
 plugin talks to a second copy of the core that nobody started. `M64P_RSP` and
@@ -64,7 +88,7 @@ dependency of the build. Nothing here is compiled by `build.sh`. It exists so
 that the next game's version of "it runs and does nothing" has something to
 be measured against.
 
-With the stub video plugin the core stops a frame or two into a game that
-waits for the display processor, which is fine for everything above -- the
-boot, the loading, the first seconds -- and not fine for watching a game play.
-Attaching a real video plugin needs a screen.
+`refrun` still runs on the core's stub video, which stops a frame or two into
+a game that waits for the display processor: fine for boot and loading, no
+good for watching a game play. `refdbg` with `M64P_GFX` and `refshot` attach a
+real one, which needs a screen and opens a window.

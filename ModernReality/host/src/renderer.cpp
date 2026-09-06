@@ -307,6 +307,30 @@ public:
                      height, origin);
     }
 
+    /// The console's eight megabytes at one of the frames a screenshot names.
+    ///
+    /// A picture says what came out; this says what the game thought. The two
+    /// together are what a comparison against the reference console is made
+    /// of, and the frame number is what makes them the same moment: wall clock
+    /// cannot line up a cached interpreter with compiled code, and a vertical
+    /// interrupt is a thing both consoles count the same way.
+    void write_memory_image(unsigned frame) const {
+        const char *path = std::getenv("N64B_SCREENSHOT_RAM");
+        if (path == nullptr) {
+            return;
+        }
+        char named[512];
+        std::snprintf(named, sizeof(named), "%s.%u.bin", path, frame);
+        std::FILE *out = std::fopen(named, "wb");
+        if (out == nullptr) {
+            std::fprintf(stderr, "note: could not write %s\n", named);
+            return;
+        }
+        std::fwrite(app_->core.RDRAM, 1, 8u * 1024u * 1024u, out);
+        std::fclose(out);
+        std::fprintf(stderr, "note: wrote %s, the console's memory at frame %u.\n", named, frame);
+    }
+
     void update_screen() override {
         if (app_ == nullptr) {
             return;
@@ -348,6 +372,7 @@ public:
                     named = stem + "." + std::to_string(frame) + suffix;
                 }
                 write_screenshot(named.c_str());
+                write_memory_image(frame);
             }
         }
         // What the VI is scanning out, once a second, in developer mode. It is

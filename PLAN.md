@@ -1074,7 +1074,8 @@ stopping.
 
 ### Where Banjo-Tooie is now
 
-It plays.
+It runs, and it cannot be looked at: see "The world through the wrong lens"
+below for the projection that spoils every frame of what follows.
 
 ```
 boot -> unpack -> the intro cutscene -> the title screen -> the file select
@@ -1131,6 +1132,98 @@ game's version of this does not start here:
   cycle and the fifteen-thousandth display list is the same picture as the
   six-hundredth. There is no slow path being waited out.
 
+### The world through the wrong lens
+
+Banjo-Tooie boots, plays its opening, reaches its title screen and runs its
+attract mode -- and everything in the world is smeared. The terrain comes out
+as long radial ribbons converging on the middle of the screen, the camera
+looks like it is inside the ground, and the title screen shows a river where
+the console shows a rock face with a Jinjo standing in a cave.
+
+It is one number, and it is the game's own.
+
+The display list loads a matrix at `0x8017AFB0` every frame, and decoding it on
+both consoles at the same moment says this:
+
+```
+              ours                                console
+    0.0625   0.0003   0.3845   0.3841     0.6602   0.0029   0.3843   0.3839
+    0.0000   0.1725  -0.0011  -0.0011     0.0000   1.8210  -0.0010  -0.0010
+    0.0750  -0.0002  -0.3205  -0.3201     0.7910  -0.0024  -0.3207  -0.3204
+  175.8986 -588.2182 135.0732 139.9237  1856.3077 -6221.4277 132.8866 137.7395
+```
+
+The third and fourth columns agree to four figures. The first and second are
+smaller here by 10.56, both of them, exactly. Those two columns carry the
+projection's horizontal and vertical scale and nothing else, so what that
+factor is, is the field of view: `cot(fovy/2)` is 1.821 on the console, which
+is a 58 degree lens, and 0.1725 here, which is a 160 degree one. A fisheye
+that wide is the whole of what a player sees.
+
+The renderer is drawing what it is given. RT64 identifies the microcode
+correctly -- `F3DEX2.NoN.fifo 2.08`, by its own hash of the text and data the
+task names -- and the matrix above is the game's, sitting in RDRAM, before
+anything of ours touches it.
+
+Where the factor comes from is one function that never runs. The game keeps a
+small stack of float matrices at `0x8007B4F0`; the console fills three of them
+and hands the third to `guMtxF2L`, and that third one is the camera:
+
+```
+    0.1158   0.0410  -0.5873   0.0000
+   -0.0210   0.5985   0.0376   0.0000
+    0.5883   0.0133   0.1169   0.0000
+  963.1885 6911.2490 -2756.3979  1.0000
+```
+
+Here the second and third entries are never written at all, and the game hands
+over the first, which is a fixed 0.28 scale and a translation of ten. The
+camera transform is not applied, and the projection that comes out of the
+multiplication is the one above.
+
+The entry is written by `func_80019AA0`, called from `func_800DCF48`, and
+`func_800DCF48` is reachable from exactly one place in the whole image: entry
+2 of a table of twenty-four handlers at `0x8012306C`. `func_800DE2A4` is the
+interpreter that dispatches through it -- read an opcode, index the table,
+call, advance by the size in the next word -- and it runs 5,182 times in
+twenty seconds here without ever seeing opcode 2. On the console it sees it
+constantly, and recurses into itself through it.
+
+So the question that is left is why the scene graph this runtime walks has no
+camera node in it. What has been ruled out on the way there, so that the next
+look does not start here:
+
+- **The table is right.** All twenty-four handler addresses at `0x8012306C`
+  are identical on both consoles, and `0x800DCF48` is entry 2 in both.
+- **The command data is right.** The streams the interpreter walks hold the
+  same bytes at the same addresses on both consoles.
+- **The projection helper is right.** `guFrustum` gets the same arguments
+  here as there -- l=-608, r=608, b=-456, and the same output address -- and
+  writes the same matrix.
+- **The viewport is right.** Scale (152, 86, 127.8) and centre (152, 114,
+  127.8) on both.
+- **The display list agrees for a long way.** The two consoles' lists are
+  identical, operand for operand, for the first 507 commands -- the same
+  framebuffer, the same scissor, the same sub-list addresses -- and part when
+  they branch into the per-frame object arena.
+- **The frame rate is not the problem.** Both consoles run this part of the
+  game at about twenty frames a second: `osViSwapBuffer` is called 327 times
+  in twenty seconds there, and the display list goes out every three vertical
+  interrupts here. The gap between them is a boot that takes ten seconds
+  longer, not a game that runs slow.
+- **Nor is the plumbing.** Retrace messages are delivered at sixty a second
+  with none dropped and a mean delay of fifteen microseconds; the game's own
+  code runs for twenty-five milliseconds in every second and waits for the
+  rest; thread handoffs cost thirteen milliseconds a second across nine
+  hundred of them.
+
+The tools that answered this are in `ModernReality/tools/refconsole`, and two
+of them are new: `refshot`, which screenshots the reference console at a named
+*frame* rather than a named second and writes its memory out beside the
+picture, and `n64dl.py`, which turns one of those images back into the display
+list the game asked for. `n64b-run` grew `N64B_SCREENSHOT_RAM` to write the
+same thing at the same frames, which is what makes the two comparable at all.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is
@@ -1167,21 +1260,31 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **Playing Banjo-Tooie further than its opening.** It boots, plays its
+3. **The camera node Banjo-Tooie never walks.** Everything the game draws
+   goes through a projection ten and a half times too wide, because the one
+   handler that writes the camera's matrix is never dispatched. "The world
+   through the wrong lens" above has the measurement, what it is not, and the
+   one question left: why the scene graph this runtime walks has no node of
+   that kind in it. Until that is answered the game is playable and unlookable
+   at, which is the same thing as not playing.
+4. **Playing Banjo-Tooie further than its opening.** It boots, plays its
    intro, reaches the file select, starts a game and plays the scene in
    Banjo's house, and runs its attract mode round six worlds without
    stopping. What nobody has done is play it for an hour: a game this size
    has more of the runtime to reach than four minutes of it can, and the
    three things the opening turned up -- the boot ROM's leftovers, uncached
    memory, a thread that could not be interrupted -- were each invisible
-   until something asked for them.
-4. **Measuring an unpacked segment rather than being told it.** The two numbers
+   until something asked for them. One that an hour has already turned up is
+   a crash: about a hundred seconds in, ultramodern's timer thread takes a
+   bad address, reading an `OSTimer` field as a host offset rather than a
+   console one.
+5. **Measuring an unpacked segment rather than being told it.** The two numbers
    a `[[unpacked]]` block carries were both found mechanically — the entry is
    what the runtime reported it could not find, and the extent is every word
    that differs from what IPL3 copied. Both could be done by the analyser
    instead of by hand, and then a compressed cartridge would need no record at
    all beyond the one driver name.
-5. **More titles.** Three is not a sample. Everything the analyser knows how to
+6. **More titles.** Three is not a sample. Everything the analyser knows how to
    do it learned from Super Mario 64, Mario Builder 64 and Banjo-Tooie, and the
    next ROM will teach it something else.
 

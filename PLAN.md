@@ -1343,17 +1343,41 @@ an asynchronous Objective-C API for a job a system tool already does -- and the
 frame out of memory is the fallback, which says so when it is used, and now
 carries the video interface's gamma so that at least it is lit like the window.
 
-What the fixed instruments then said, at matched frames of the same game:
+What the fixed instruments then said. One script -- Start at frame 1550, A at
+1850, and nothing after -- drives both consoles, and at every frame it was asked
+for they are the same picture:
+
+- **1300**, the attract mode: the same cave, the same camera, Banjo standing in
+  the middle of it, "PRESS START" in the same place. And the display list behind
+  it, whose 3,383 commands are the same commands in the same order on both,
+  differing only in the addresses two runs allocated at and in one alpha value
+  three steps into a fade.
+- **1700**, the file select: the same room, the same three files, the same
+  "PRESS Ⓐ TO PLAY THE GAME." and "GAME 1: EMPTY".
+- **2200**, the intro: the same card of text over the same rain.
+- **5000**, seven minutes in, Bottles stammering "WHOLE H-HOUSE S-SHAKES
+  L-LOTS!": the same room from the same camera -- including a flat untextured
+  orange quad standing on the poker table, which looked like a missing texture
+  here until the console drew it in the same place.
+- **5600**: the Hag 1 breaking out of the rock, the same angle, the same green
+  glow through the rain.
+- **6800**, Banjo saying "B-BUT IT'S DARK OUT THERE AND..": the same close-up,
+  the same cards in his hand, the same fish bowl behind him -- including a hard
+  black polygon across his face, which also looked wrong here until the console
+  drew the same one.
+
+Two things that looked like bugs and were not is the point. A picture of a
+low-polygon game is full of things that look like a renderer having a bad day,
+and the only way to tell is to have the other console draw the same frame.
 
 - the title screen, its camera, Klungo under the logo and the copyright line;
 - the attract mode, all six worlds of it, with its characters, its enemies, its
   fire, its crates and its "PRESS START" arcing across the screen;
-- the file select, the intro cutscene, the rain, the dialogue;
 - VI_STATUS 0x00013006 on both consoles, which is the pixel format, the
   anti-aliasing mode and the gamma the game asked for;
-- and one display list, at frame 1300, whose 3,383 commands are the same
-  commands in the same order on both, differing only in the addresses two runs
-  allocated at and in one alpha value three steps into a fade.
+- and the frame rate, which is the game's own: it reads a divisor out of its
+  level data -- three at the title, two in the intro -- and waits out that many
+  retraces, and the word holds the same value on both consoles.
 
 **One thing was really wrong, and it was a name.** `osViGetCurrentFramebuffer`
 and `osViGetNextFramebuffer` are the same function twice over -- disable

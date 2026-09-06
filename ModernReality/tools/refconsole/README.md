@@ -29,6 +29,11 @@ script the things a debugger gives a person:
   - `-k <n>` skip the first `n` hits, `-n <n>` stop reporting after `n`,
     `-D <path>` write memory out at the hit, `-t <secs>` how long to run.
 
+  - `-c <lo> <hi> <file>` takes a census: every address in the window that the
+    game executed, written out at the end. A breakpoint answers "did it get
+    here" for one address per run of the game; this answers it for a whole
+    subsystem at once, and `censusdiff.py` turns it into the list that matters.
+
   `M64P_GFX` names a real video plugin, and with one attached refdbg follows a
   game as long as you like rather than stopping a frame or two in. Without it
   the core's stub video never finishes a display list, which is fine for a
@@ -41,6 +46,11 @@ script the things a debugger gives a person:
   same interrupts. `REFSHOT_RAM=<prefix>` writes the console's memory at each
   of them too, so a picture and the state behind it come out together, and
   `N64B_INPUT` drives the pad in exactly the spelling `n64b-run` uses.
+- `censusdiff.py <census> <trace-all.log> <symbols.toml>` says which functions
+  the console entered and this runtime never did, and the reverse. The second
+  file is what `n64b-run` prints with a `--trace` module and `N64B_TRACE_ALL`.
+  The highest function in the list is the branch that went the other way;
+  everything under it follows from that one.
 - `n64dl.py <image.bin> <address>` reads a display list back out of one of
   those memory images — counted by kind, or `--trace` for every command in
   order, or `--matrix` for the fixed point matrix at an address. Two of those,

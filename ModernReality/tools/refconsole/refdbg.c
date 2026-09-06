@@ -28,6 +28,13 @@ static int want_stack = 0;
 #define RING 65536
 static unsigned ring[RING]; static unsigned ring_at = 0;
 static unsigned trace_lo = 0, trace_hi = 0;
+// Which addresses in a window the game actually executed. One bit each, which
+// is what makes "did it ever get here" answerable for a whole subsystem at
+// once rather than one breakpoint at a time -- the question a diff against the
+// other console's own list of functions wants.
+static unsigned census_lo = 0, census_hi = 0;
+static unsigned char *census = NULL;
+static const char *census_path = NULL;
 static int ring_want = 0;
 static int want_regs = 0;
 static unsigned mem_at = 0; static int mem_words = 0;
@@ -88,6 +95,14 @@ static void dbg_init(void) {
         DebugBreakpointCommand(M64P_BKP_CMD_ADD_STRUCT, 0, &bp);
         fprintf(stderr, "[bp] ring over 0x%08X..0x%08X\n", trace_lo, trace_hi - 1);
     }
+    if (census != NULL) {
+        m64p_breakpoint bp;
+        memset(&bp, 0, sizeof(bp));
+        bp.address = census_lo; bp.endaddr = census_hi - 1;
+        bp.flags = M64P_BKP_FLAG_ENABLED | M64P_BKP_FLAG_EXEC;
+        DebugBreakpointCommand(M64P_BKP_CMD_ADD_STRUCT, 0, &bp);
+        fprintf(stderr, "[bp] census over 0x%08X..0x%08X\n", census_lo, census_hi - 1);
+    }
     for (int i = 0; i < write_count; i++) {
         m64p_breakpoint bp;
         memset(&bp, 0, sizeof(bp));
@@ -102,6 +117,11 @@ static void dbg_init(void) {
 }
 
 static void dbg_update(unsigned int pc) {
+    if (census != NULL && pc >= census_lo && pc < census_hi) {
+        census[(pc - census_lo) >> 5] |= (unsigned char)(1u << (((pc - census_lo) >> 2) & 7));
+        DebugSetRunState(M64P_DBG_RUNSTATE_RUNNING);
+        return;
+    }
     if (trace_hi != 0 && pc >= trace_lo && pc < trace_hi) {
         ring[ring_at++ % RING] = pc;
         DebugSetRunState(M64P_DBG_RUNSTATE_RUNNING);
@@ -197,6 +217,11 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-r") == 0 && i + 2 < argc) {
             trace_lo = (unsigned)strtoul(argv[++i], NULL, 0);
             trace_hi = (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "-c") == 0 && i + 3 < argc) {
+            census_lo = (unsigned)strtoul(argv[++i], NULL, 0);
+            census_hi = (unsigned)strtoul(argv[++i], NULL, 0);
+            census_path = argv[++i];
+            census = calloc((census_hi - census_lo) / 32 + 1, 1);
         } else if (strcmp(argv[i], "-R") == 0 && i + 1 < argc) {
             ring_want = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
@@ -260,6 +285,21 @@ int main(int argc, char **argv) {
     CoreDoCommand(M64CMD_EXECUTE, 0, NULL);
     pthread_join(t, NULL);
     CoreDoCommand(M64CMD_ROM_CLOSE, 0, NULL);
+    if (census != NULL && census_path != NULL) {
+        FILE *f = fopen(census_path, "w");
+        if (f != NULL) {
+            unsigned long counted = 0;
+            for (unsigned a = census_lo; a < census_hi; a += 4) {
+                if (census[(a - census_lo) >> 5] & (1u << (((a - census_lo) >> 2) & 7))) {
+                    fprintf(f, "%08X\n", a);
+                    counted++;
+                }
+            }
+            fclose(f);
+            fprintf(stderr, "[census] %lu of %u addresses executed, written to %s\n",
+                    counted, (census_hi - census_lo) / 4, census_path);
+        }
+    }
     CoreShutdown();
     return 0;
 }

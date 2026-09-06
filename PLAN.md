@@ -1292,6 +1292,14 @@ What has been ruled out at this level, so the next look does not start here:
   ones are asked for.
 - **It is not memory pressure.** The allocator runs 156 times here in
   twenty-two seconds against 160 there.
+- **No code is being cut short.** Not one of the 9,741 recovered functions has
+  a branch that leaves its recorded extent, and the live recompiler never ends
+  an overlay function at a `jr $ra` with a jump table above it -- the one way
+  its length heuristic could truncate a switch, since a jump table's cases are
+  reached indirectly and so never widen the "furthest branch" it stops on.
+- **No data is being cut off.** The unpacked image holds nothing at all above
+  the main segment's recorded end, so no rodata and no jump table is left
+  outside it.
 - **It cannot be aligned by frame.** This runtime's boot spends about ten
   seconds live-recompiling while the game runs, so the two consoles are never
   at the same place at the same vertical interrupt, and a diff of the game's

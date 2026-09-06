@@ -1276,7 +1276,7 @@ census against a trace. `n64b-run` grew `N64B_SCREENSHOT_RAM`, `N64B_TRACE_STOP_
 and `N64B_TRACE_STOP_IN` to write the same thing at the same *game event*, which
 is what makes the two comparable at all.
 
-## Two consoles, and the three clocks between them
+## Two consoles, and the instruments between them
 
 The lens was the last thing wrong with what Banjo-Tooie draws, and the way to
 find out was to put the two consoles side by side again and look. Doing that
@@ -1292,6 +1292,20 @@ entries became a script of one, silently, and the reference console held Start
 down forever while this one played the script. Two consoles doing different
 things, from the same script, with no error anywhere. It is `strtok_r` now,
 with two save pointers.
+
+**And the one button it pressed was the wrong one.** The names were mapped to
+the numbers the console uses -- A at bit 15, Start at bit 12, the layout of the
+N64's own controller halfword -- and mupen64plus's `BUTTONS` is not that. It is
+a union over a bitfield the compiler packs from the bottom, R_DPAD at bit 0 and
+A_BUTTON at 7, so `start` pressed the R trigger, `a` and `b` set the two
+reserved bits and did nothing at all, `l` pressed Z, `r` pressed Start, and the
+d-pad and the C buttons swapped places. What that looks like is a reference
+console that ignores the pad: every script ever played to it left it in its
+attract mode while the runtime beside it walked into the game, which reads as
+two consoles that disagree and is really one console being handed a held R
+trigger. The bits come from the union's own named fields now. With them right,
+one script drives both to the same place -- Start at 1550 and A at 1850 puts
+each of them on the file select at frame 1700 and into the same intro at 2200.
 
 **A frame is not a frame.** `refshot` advances the reference console with
 `M64CMD_ADVANCE_FRAME` and its README said that was a vertical interrupt, and

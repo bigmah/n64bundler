@@ -159,12 +159,37 @@ static struct scripted_frame *script;
 static int script_count;
 static unsigned long pad_reads;
 
-static const struct { const char *name; unsigned short bit; } kButtons[] = {
-    {"a", 0x8000}, {"b", 0x4000}, {"z", 0x2000}, {"start", 0x1000},
-    {"du", 0x0800}, {"dd", 0x0400}, {"dl", 0x0200}, {"dr", 0x0100},
-    {"l", 0x0020}, {"r", 0x0010},
-    {"cu", 0x0008}, {"cd", 0x0004}, {"cl", 0x0002}, {"cr", 0x0001},
-};
+/// The bit a button name sets in mupen64plus's own `BUTTONS`, or -1.
+///
+/// Written through the union's named fields rather than as numbers, because
+/// the numbers are not the console's. `BUTTONS.Value` is a bitfield the
+/// compiler packs from the bottom -- R_DPAD is bit 0 and A_BUTTON is bit 7 --
+/// where the N64's own controller halfword has A at bit 15 and Start at 12.
+/// Written out by hand in the console's order, as they were, every button in
+/// this file was a different button: `start` pressed the R trigger, `a` and
+/// `b` set the two reserved bits and did nothing at all, and the reference
+/// console sat in its attract mode through every script this tool played it,
+/// which read as a console that ignores the pad.
+static int mask_for(const char *name) {
+    BUTTONS b;
+    b.Value = 0;
+    if      (strcmp(name, "a") == 0)     b.A_BUTTON = 1;
+    else if (strcmp(name, "b") == 0)     b.B_BUTTON = 1;
+    else if (strcmp(name, "z") == 0)     b.Z_TRIG = 1;
+    else if (strcmp(name, "start") == 0) b.START_BUTTON = 1;
+    else if (strcmp(name, "l") == 0)     b.L_TRIG = 1;
+    else if (strcmp(name, "r") == 0)     b.R_TRIG = 1;
+    else if (strcmp(name, "du") == 0)    b.U_DPAD = 1;
+    else if (strcmp(name, "dd") == 0)    b.D_DPAD = 1;
+    else if (strcmp(name, "dl") == 0)    b.L_DPAD = 1;
+    else if (strcmp(name, "dr") == 0)    b.R_DPAD = 1;
+    else if (strcmp(name, "cu") == 0)    b.U_CBUTTON = 1;
+    else if (strcmp(name, "cd") == 0)    b.D_CBUTTON = 1;
+    else if (strcmp(name, "cl") == 0)    b.L_CBUTTON = 1;
+    else if (strcmp(name, "cr") == 0)    b.R_CBUTTON = 1;
+    else return -1;
+    return (int)b.Value;
+}
 
 static void parse_script(const char *spec) {
     if (spec == NULL || *spec == '\0') return;
@@ -187,9 +212,8 @@ static void parse_script(const char *spec) {
         for (char *name = strtok_r(colon + 1, "+", &names); name != NULL;
              name = strtok_r(NULL, "+", &names)) {
             int known = 0;
-            for (size_t i = 0; i < sizeof(kButtons) / sizeof(kButtons[0]); i++) {
-                if (strcmp(name, kButtons[i].name) == 0) { frame.buttons |= kButtons[i].bit; known = 1; }
-            }
+            const int bit = mask_for(name);
+            if (bit >= 0) { frame.buttons |= (unsigned short)bit; known = 1; }
             if (strcmp(name, "up") == 0)    { frame.y =  80; known = 1; }
             if (strcmp(name, "down") == 0)  { frame.y = -80; known = 1; }
             if (strcmp(name, "left") == 0)  { frame.x = -80; known = 1; }

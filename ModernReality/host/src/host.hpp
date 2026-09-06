@@ -55,6 +55,23 @@ void pump_window();
 /// The window's SDL handle, for the parts of RT64 that ask for it.
 struct SDL_Window *window_handle();
 
+/// Write a picture of the window to `path`, as a PPM. False if the window
+/// server would not give one, in which case the caller has the frame RT64 wrote
+/// back into the console's memory to fall back on -- which is not the same
+/// picture, and says so.
+bool capture_window(const char *path);
+
+/// How many frames the *game* has drawn: one per display list it has handed
+/// the renderer.
+///
+/// This is the clock every scripted thing here is counted in -- screenshots
+/// and `N64B_INPUT` -- because it is the only one the reference console counts
+/// too. mupen64plus advances a frame in `new_frame()`, which its RSP calls once
+/// per graphics task, so "frame 900" means the same moment of the same game on
+/// both. The video interface's own sixty a second is a different clock and
+/// lines up with nothing.
+uint64_t frames_drawn();
+
 // --- the pieces that plug into ultramodern ---------------------------------
 
 ultramodern::renderer::callbacks_t renderer_callbacks();

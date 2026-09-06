@@ -120,9 +120,15 @@ void poll_input() {
 // The names are the pad's own -- a b z start l r, du dd dl dr for the d-pad,
 // cu cd cl cr for the C buttons -- joined with `+`, and up down left right
 // push the analog stick. An empty list of buttons releases everything, which
-// is what makes a press a press rather than a hold. Frames are counted in
-// reads of controller one, which is once per frame in every game that polls
-// the way libultra intends.
+// is what makes a press a press rather than a hold.
+//
+// Frames are the frames the *game* has drawn -- `n64b::frames_drawn()`, one per
+// display list -- which is the clock `N64B_SCREENSHOT_AFTER` uses and the clock
+// `refshot` counts on the reference console. That matters because the point of
+// spelling a script this way is that one script drives both consoles: a game
+// that draws twenty frames a second has three video interrupts per frame and a
+// pad it reads on each of them, so counting either of those instead would put
+// the same script in three different places in the game.
 
 struct ScriptedFrame {
     unsigned long at;
@@ -131,7 +137,6 @@ struct ScriptedFrame {
 };
 
 std::vector<ScriptedFrame> scripted;
-unsigned long scripted_reads = 0;
 
 /// Parse `N64B_INPUT` once, into frames sorted by when they start.
 const std::vector<ScriptedFrame> &input_script() {
@@ -199,7 +204,7 @@ bool scripted_input(uint16_t *buttons_out, float *x_out, float *y_out) {
     if (script.empty()) {
         return false;
     }
-    const unsigned long now = scripted_reads++;
+    const unsigned long now = (unsigned long)n64b::frames_drawn();
     const ScriptedFrame *current = nullptr;
     for (const ScriptedFrame &frame : script) {
         if (frame.at > now) {

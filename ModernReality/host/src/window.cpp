@@ -15,7 +15,12 @@
 #include <SDL.h>
 #include <SDL_syswm.h>
 
+#include <ApplicationServices/ApplicationServices.h>
+
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <unistd.h>
 
 namespace n64b {
 namespace {
@@ -29,9 +34,90 @@ void toggle_fullscreen() {
     SDL_SetWindowFullscreen(window, fullscreen_now ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
+/// This process's window, as the window server numbers it.
+///
+/// Found by owner rather than kept from SDL because SDL's own window id is its
+/// own; the number the window server uses is the one a picture can be asked
+/// for. There is one on-screen window here, so the first one this process owns
+/// is it.
+CGWindowID window_server_id() {
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (list == nullptr) {
+        return kCGNullWindowID;
+    }
+    CGWindowID found = kCGNullWindowID;
+    const pid_t self = getpid();
+    for (CFIndex i = 0, n = CFArrayGetCount(list); i < n && found == kCGNullWindowID; i++) {
+        CFDictionaryRef entry = (CFDictionaryRef)CFArrayGetValueAtIndex(list, i);
+        CFNumberRef owner = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowOwnerPID);
+        CFNumberRef number = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowNumber);
+        int pid = 0, id = 0;
+        if (owner == nullptr || number == nullptr) {
+            continue;
+        }
+        CFNumberGetValue(owner, kCFNumberIntType, &pid);
+        CFNumberGetValue(number, kCFNumberIntType, &id);
+        if (pid == self) {
+            found = CGWindowID(id);
+        }
+    }
+    CFRelease(list);
+    return found;
+}
+
 } // namespace
 
 SDL_Window *window_handle() { return window; }
+
+/// Write a picture of the window itself, and say where it went.
+///
+/// The frame RT64 writes back into the console's memory is not the whole of
+/// what it drew: it copies a framebuffer pair's rows when that pair is done,
+/// and a scene assembled out of several of them leaves the copy holding some
+/// of the frame and not the rest. Read as a screenshot that is a picture with
+/// things missing from it that the window has -- a character, a fire, the
+/// letters of a word -- which is a comparison against a reference console
+/// losing an argument it should have won.
+///
+/// So the picture is of the window, which is by definition what the game looks
+/// like. It goes through `screencapture` rather than through CoreGraphics
+/// because `CGWindowListCreateImage` is gone from the macOS 15 SDK and its
+/// replacement is an asynchronous Objective-C API for a job a system tool
+/// already does. The cost is a process and a frame or so of lag behind the
+/// display list that asked for it, and neither matters for what this is for:
+/// what is on the screen, at a named moment of the game, next to the same
+/// moment on another console.
+///
+/// The file is a PNG whatever extension was asked for, because that is what
+/// `screencapture` writes.
+bool capture_window(const char *path) {
+    const CGWindowID id = window_server_id();
+    if (id == kCGNullWindowID) {
+        return false;
+    }
+    std::string named = path;
+    const size_t dot = named.find_last_of('.');
+    const size_t slash = named.find_last_of('/');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        named.resize(dot);
+    }
+    named += ".png";
+    // A quote in the path would end the shell's argument early, and there is
+    // nothing sensible to do with such a path but decline it.
+    if (named.find('\'') != std::string::npos) {
+        return false;
+    }
+
+    char command[1024];
+    std::snprintf(command, sizeof(command), "/usr/sbin/screencapture -x -o -t png -l%u '%s'",
+                  unsigned(id), named.c_str());
+    if (std::system(command) != 0) {
+        return false;
+    }
+    std::fprintf(stderr, "note: wrote %s, a picture of the window.\n", named.c_str());
+    return true;
+}
 
 bool open_window(const std::string &title, bool fullscreen,
                  ultramodern::renderer::WindowHandle &out, std::string &error) {

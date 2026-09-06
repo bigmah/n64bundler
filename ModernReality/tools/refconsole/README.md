@@ -39,13 +39,33 @@ script the things a debugger gives a person:
   the core's stub video never finishes a display list, which is fine for a
   question about boot and useless for a question about play.
 - `refshot <rom> <shots-dir> <frame>...` takes a screenshot at each of those
-  *frames*, with a real video plugin, by pausing the core and advancing it one
-  vertical interrupt at a time. Frames rather than seconds is the whole point:
-  a cached interpreter and a pile of compiled code do not reach the same
-  moment at the same time, and `n64b-run`'s `N64B_SCREENSHOT_AFTER` counts the
-  same interrupts. `REFSHOT_RAM=<prefix>` writes the console's memory at each
-  of them too, so a picture and the state behind it come out together, and
-  `N64B_INPUT` drives the pad in exactly the spelling `n64b-run` uses.
+  *frames*, with a real video plugin, by pausing the core and advancing it a
+  frame at a time. Frames rather than seconds is the whole point: a cached
+  interpreter and a pile of compiled code do not reach the same moment at the
+  same time. `REFSHOT_RAM=<prefix>` writes the console's memory at each of them
+  too, so a picture and the state behind it come out together, and `N64B_INPUT`
+  drives the pad in exactly the spelling `n64b-run` uses.
+
+  **A frame is one the game drew, not one the video interface scanned out.**
+  `M64CMD_ADVANCE_FRAME` stops at mupen64plus's `new_frame()`, which its RSP
+  calls once per graphics task -- so a frame here is one display list, and
+  `n64b-run` counts the same thing for `N64B_SCREENSHOT_AFTER` and `N64B_INPUT`.
+  The distinction is not pedantry: Banjo-Tooie draws twenty frames a second
+  against sixty vertical interrupts, so a picture numbered in interrupts and a
+  picture numbered in frames are three times apart and get further apart the
+  longer the game runs. Two consoles compared on the wrong one of these look
+  like a runtime running at a third of the speed, which is what they looked
+  like here for most of a day. Reads of the controller are a third clock again
+  -- three per frame in this game, one per interrupt -- and no script should be
+  counted in them.
+  Each shot line also reports the video interface's own registers, which are
+  directly comparable against `n64b-run`'s: the same VI_STATUS on both consoles
+  means the runtime models the pixel format, the anti-aliasing and the gamma
+  the way the game asked for. VI_ORIGIN is reported and should not be counted:
+  it alternates between the game's two framebuffers on every retrace whatever
+  the frame rate is, because libultra keeps two `OSViContext`s and swaps them
+  each time.
+
 - `censusdiff.py <census> <trace-all.log> <symbols.toml>` says which functions
   the console entered and this runtime never did, and the reverse. The second
   file is what `n64b-run` prints with a `--trace` module and `N64B_TRACE_ALL`.

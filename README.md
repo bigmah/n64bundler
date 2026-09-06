@@ -28,7 +28,16 @@ and the dialogue and the HUD. Left alone it runs its attract mode round six
 worlds and comes back. For a while it did all of that through a lens ten and a
 half times too wide, which turned out to be five instructions of `atan2` cut
 off from the rest of it by a boundary nothing called; the world it draws now
-matches a reference console's to every digit of the projection matrix.
+matches a reference console's to every digit of the projection matrix. Held up
+against that console frame by frame it draws the same title screen, the same
+attract mode round all six worlds with its characters and its fire and its
+text, the same file select and the same rain over the same cutscene — and one
+display list of 3,383 commands that is the same commands in the same order on
+both. Getting to that comparison meant fixing the instruments first: a scripted
+pad that pressed one button and then stopped, a "frame" that meant one thing on
+one console and something three times shorter on the other, and a screenshot
+taken out of the console's memory rather than off the screen, which is a
+picture with the characters missing from it. [PLAN.md](PLAN.md) has all three.
 Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what

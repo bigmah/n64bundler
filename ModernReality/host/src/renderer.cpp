@@ -19,6 +19,10 @@
 
 #include <SDL.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +38,14 @@ extern "C" PTR(void) osViGetCurrentFramebuffer();
 #include "hle/rt64_application.h"
 
 namespace n64b {
+
+/// Frames the game has drawn, for the parts of the host that are counted in
+/// them. Written by the renderer on the graphics thread and read by the input
+/// script on a game thread, which is one writer and one reader of a word.
+std::atomic<uint64_t> drawn_frames{0};
+
+uint64_t frames_drawn() { return drawn_frames.load(std::memory_order_relaxed); }
+
 namespace {
 
 /// The console registers RT64 wants that nothing here models.
@@ -223,6 +235,7 @@ public:
         app_->interpreter->loadUCodeGBI(uint32_t(task->t.ucode) & physical,
                                         uint32_t(task->t.ucode_data) & physical, true);
         frames_++;
+        drawn_frames.store(frames_, std::memory_order_relaxed);
         // Whether the renderer knows this game's microcode at all is the other
         // half of a black window, and it is knowable exactly once.
         static bool first = true;
@@ -232,7 +245,10 @@ public:
                                  "its microcode.\n",
                          app_->interpreter->hleGBI != nullptr ? "recognises" : "does NOT recognise");
         }
+        last_display_list_ = uint32_t(task->t.data_ptr);
+        const auto started = std::chrono::steady_clock::now();
         app_->processDisplayLists(app_->core.RDRAM, uint32_t(task->t.data_ptr) & physical, 0, true);
+        dl_time_ += std::chrono::steady_clock::now() - started;
     }
 
     void send_dummy_workload(uint32_t fb_address) override {
@@ -250,6 +266,15 @@ public:
     /// in the console's own format, which is what a real video interface would
     /// be reading, so that copy is the frame -- and turning it into a file
     /// costs nothing and needs nothing from the graphics API.
+    ///
+    /// What that copy is not is what the window shows, because the video
+    /// interface is not only a reader: with VI_CTRL_GAMMA_ON it raises every
+    /// channel to a power on the way out, and RT64 does the same to what it
+    /// presents. A frame written straight out of memory is therefore several
+    /// stops darker than the game, and darker than any emulator's screenshot of
+    /// the same moment -- which turns every comparison against the reference
+    /// console into an argument about brightness. So the gamma goes on here
+    /// too, with RT64's own exponent, and the picture is the window's.
     void write_screenshot(const char *path) const {
         const ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
         const unsigned width = vi->VI_WIDTH_REG;
@@ -275,6 +300,15 @@ public:
             std::fprintf(stderr, "note: could not write %s\n", path);
             return;
         }
+        // The exponent RT64 presents with, and the table that saves doing it
+        // per channel per pixel.
+        const bool gamma_on = (vi->VI_STATUS_REG & 0x8u) != 0;
+        unsigned char gamma[256];
+        for (int i = 0; i < 256; i++) {
+            gamma[i] = gamma_on
+                           ? (unsigned char)std::lround(255.0 * std::pow(i / 255.0, 1.0 / 2.2))
+                           : (unsigned char)i;
+        }
         std::fprintf(out, "P6\n%u %u\n255\n", width, height);
         const uint8_t *rdram = app_->core.RDRAM;
         for (unsigned y = 0; y < height; y++) {
@@ -298,13 +332,14 @@ public:
                     g = (word >> 16) & 0xFF;
                     b = (word >> 8) & 0xFF;
                 }
-                const unsigned char rgb[3] = {(unsigned char)r, (unsigned char)g, (unsigned char)b};
+                const unsigned char rgb[3] = {gamma[r & 0xFF], gamma[g & 0xFF], gamma[b & 0xFF]};
                 std::fwrite(rgb, 1, 3, out);
             }
         }
         std::fclose(out);
-        std::fprintf(stderr, "note: wrote %s, %u by %u, from the frame at 0x%08X\n", path, width,
-                     height, origin);
+        std::fprintf(stderr, "note: wrote %s, %u by %u, from the frame at 0x%08X, vi status 0x%08X%s\n",
+                     path, width, height, origin, vi->VI_STATUS_REG,
+                     gamma_on ? ", with the video interface's gamma" : "");
     }
 
     /// The console's eight megabytes at one of the frames a screenshot names.
@@ -328,7 +363,12 @@ public:
         }
         std::fwrite(app_->core.RDRAM, 1, 8u * 1024u * 1024u, out);
         std::fclose(out);
-        std::fprintf(stderr, "note: wrote %s, the console's memory at frame %u.\n", named, frame);
+        // The address the last display list started at, because that is what
+        // reading one back out of this image needs and nothing in the image
+        // says it: `n64dl.py <image> <address>`.
+        std::fprintf(stderr, "note: wrote %s, the console's memory at frame %u, "
+                             "whose display list began at 0x%08X.\n",
+                     named, frame, last_display_list_);
     }
 
     void update_screen() override {
@@ -341,6 +381,16 @@ public:
         // does is a sequence and one still of it is a poor account: a title, a
         // menu and a level are three runs of a minute each otherwise. With more
         // than one frame asked for, each file carries the frame it came from.
+        //
+        // A frame here is a display list the game submitted, which is one frame
+        // of the *game*, and deliberately not one interrupt of the video
+        // interface. The two are different clocks and nothing lines them up: the
+        // interface scans out sixty times a second whatever the game is doing,
+        // and Banjo-Tooie draws twenty. The reason it has to be the game's clock
+        // is `refshot` on the other console, whose frame is `M64CMD_ADVANCE_FRAME`
+        // -- and mupen64plus advances that in `new_frame()`, which its RSP calls
+        // once per graphics task. Counting anything else here makes two pictures
+        // that are numbered the same and are minutes apart in the game.
         if (const char *path = std::getenv("N64B_SCREENSHOT")) {
             static const std::vector<unsigned> at = [] {
                 std::vector<unsigned> frames;
@@ -356,14 +406,22 @@ public:
                 if (frames.empty()) {
                     frames.push_back(600);
                 }
+                // In order, because the shot for each is taken on the first
+                // screen update past it and the count of what has been taken
+                // only goes forwards.
+                std::sort(frames.begin(), frames.end());
                 return frames;
             }();
-            static unsigned taken = 0;
-            taken++;
+            // The screen update that follows the display list is the one that
+            // has it in memory to photograph, so the shot is taken on the first
+            // update after the game's frame count reaches the one asked for.
+            static uint64_t shot_through = 0;
+            const uint64_t drawn = frames_;
             for (unsigned frame : at) {
-                if (frame != taken) {
+                if (frame > drawn || frame <= shot_through) {
                     continue;
                 }
+                shot_through = frame;
                 std::string named = path;
                 if (at.size() > 1) {
                     const size_t dot = named.find_last_of('.');
@@ -371,7 +429,14 @@ public:
                     const std::string suffix = dot == std::string::npos ? "" : named.substr(dot);
                     named = stem + "." + std::to_string(frame) + suffix;
                 }
-                write_screenshot(named.c_str());
+                // A picture of the window if the window server will give one,
+                // because that is what the game looks like. The frame in the
+                // console's own memory is the fallback and not the same thing:
+                // RT64 writes it back a framebuffer pair at a time and a scene
+                // built out of several leaves parts of itself out of it.
+                if (!capture_window(named.c_str())) {
+                    write_screenshot(named.c_str());
+                }
                 write_memory_image(frame);
             }
         }
@@ -383,16 +448,31 @@ public:
             static int frames = 0;
             if (frames % 60 == 0) {
                 const ultramodern::renderer::ViRegs *vi = ultramodern::renderer::get_vi_regs();
+                // Where the graphics thread's second went. It has one queue and
+                // two kinds of work in it -- a display list the game submitted,
+                // and a screen update the VI thread posts sixty times a second
+                // -- so a game that draws twenty frames a second is either a
+                // game that submitted twenty lists or a thread that had no room
+                // for more. These two numbers say which.
+                using ms = std::chrono::duration<double, std::milli>;
                 std::fprintf(stderr,
                              "vi: origin 0x%08X width %u, game framebuffer 0x%08X, "
-                             "%llu display lists so far\n",
+                             "%llu display lists so far (%llu this second), "
+                             "%.1f ms in display lists, %.1f ms presenting\n",
                              vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
                              uint32_t(osViGetCurrentFramebuffer()),
-                             (unsigned long long)frames_);
+                             (unsigned long long)frames_,
+                             (unsigned long long)(frames_ - last_frames_),
+                             ms(dl_time_).count(), ms(present_time_).count());
+                last_frames_ = frames_;
+                dl_time_ = {};
+                present_time_ = {};
             }
             frames++;
         }
+        const auto started = std::chrono::steady_clock::now();
         app_->updateScreen();
+        present_time_ += std::chrono::steady_clock::now() - started;
     }
 
     void shutdown() override {
@@ -464,6 +544,10 @@ private:
     }
 
     std::unique_ptr<RT64::Application> app_;
+    std::chrono::steady_clock::duration dl_time_{};
+    std::chrono::steady_clock::duration present_time_{};
+    uint64_t last_frames_ = 0;
+    uint32_t last_display_list_ = 0;
     bool developer_ = false;
     /// Display lists submitted, which is the game's own frame count.
     uint64_t frames_ = 0;

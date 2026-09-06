@@ -1276,6 +1276,94 @@ census against a trace. `n64b-run` grew `N64B_SCREENSHOT_RAM`, `N64B_TRACE_STOP_
 and `N64B_TRACE_STOP_IN` to write the same thing at the same *game event*, which
 is what makes the two comparable at all.
 
+## Two consoles, and the three clocks between them
+
+The lens was the last thing wrong with what Banjo-Tooie draws, and the way to
+find out was to put the two consoles side by side again and look. Doing that
+turned up nothing wrong with the game and three things wrong with the
+instruments, which is worth writing down at more length than the answer,
+because every one of them produced a confident and false measurement first.
+
+**The scripted pad only ever pressed one button.** `refshot` parsed
+`N64B_INPUT` with `strtok` in a loop, and walked each entry's buttons with
+`strtok` again inside it. One `strtok` has one piece of state, so the inner
+walk over `start` ended the outer walk over the frames: a script of twenty-four
+entries became a script of one, silently, and the reference console held Start
+down forever while this one played the script. Two consoles doing different
+things, from the same script, with no error anywhere. It is `strtok_r` now,
+with two save pointers.
+
+**A frame is not a frame.** `refshot` advances the reference console with
+`M64CMD_ADVANCE_FRAME` and its README said that was a vertical interrupt, and
+that `n64b-run`'s `N64B_SCREENSHOT_AFTER` counted the same ones. Neither half
+was true. mupen64plus advances a frame in `new_frame()`, which its RSP calls
+once per graphics task -- so a frame there is one display list, one frame of
+the *game*. Here the count was screen updates, which is the video interface at
+sixty a second whatever the game is doing. Banjo-Tooie draws twenty. So the two
+consoles' pictures numbered 1200 were three times apart in the game and getting
+further apart, and read as a comparison they said this runtime ran the game at
+a third of the reference's speed: a whole day's worth of chasing a frame-pacing
+loop in the game's own code that was doing exactly what it does on the other
+console. Both tools count the game's own frames now, screenshots and input
+alike, and the reference console reports what it counted so the next reader
+can see it. Reads of the controller are a third clock again -- three per frame
+in this game -- and nothing is counted in them any more.
+
+**And the frame in memory is not the frame on the screen.** `write_screenshot`
+took its picture out of the console's own memory, on the argument that RT64
+copies each finished frame back there in the console's own format, so that copy
+is the frame. It is not: RT64 copies a framebuffer pair's rows back when that
+pair is done, and a scene assembled out of several pairs leaves the copy holding
+some of the frame and not the rest. What that looks like is a picture with the
+world in it and the characters missing -- and at frame 1300 of the attract mode
+it produced exactly that, a green cave with no Banjo in it, against a reference
+console with Banjo standing in the middle of the same cave, drawn from the same
+camera, from a display list this runtime had already been shown to submit
+command for command identically. The next hour went on why a static
+recompilation would drop one class of object.
+
+It does not. The window had Banjo in it the whole time. A picture of the window
+is what a screenshot is now -- through `screencapture`, because
+`CGWindowListCreateImage` is gone from the macOS 15 SDK and its replacement is
+an asynchronous Objective-C API for a job a system tool already does -- and the
+frame out of memory is the fallback, which says so when it is used, and now
+carries the video interface's gamma so that at least it is lit like the window.
+
+What the fixed instruments then said, at matched frames of the same game:
+
+- the title screen, its camera, Klungo under the logo and the copyright line;
+- the attract mode, all six worlds of it, with its characters, its enemies, its
+  fire, its crates and its "PRESS START" arcing across the screen;
+- the file select, the intro cutscene, the rain, the dialogue;
+- VI_STATUS 0x00013006 on both consoles, which is the pixel format, the
+  anti-aliasing mode and the gamma the game asked for;
+- and one display list, at frame 1300, whose 3,383 commands are the same
+  commands in the same order on both, differing only in the addresses two runs
+  allocated at and in one alpha value three steps into a fade.
+
+**One thing was really wrong, and it was a name.** `osViGetCurrentFramebuffer`
+and `osViGetNextFramebuffer` are the same function twice over -- disable
+interrupts, load a pointer, read its `framep`, restore interrupts -- and the
+only difference is which pointer: `__osViCurr` at 0x80041540 or `__osViNext` at
+0x80041544. That difference is a `%lo` relocation, which is exactly the field a
+signature has to mask out, so both signatures match both functions and whichever
+the database lists first wins at both addresses. Banjo-Tooie's frame loop is
+built on the difference between them: at 0x80015318 it reads the current
+framebuffer and at 0x80015320 the next one, and waits for retraces until they
+agree, which is how it finds out how long the display processor took. Named the
+same, the two calls returned the same value and the wait never happened.
+
+The analyser cannot break that tie -- what separates those two functions is not
+in the image -- so it no longer pretends to. It reports every address where two
+signatures match equally well, with the name it went with and the names it could
+not rule out: twenty-five of them on Banjo-Tooie, including `__osSiRawReadIo`
+against `__osSpRawReadIo` and `__osPiGetAccess` against `__osSiGetAccess`, which
+are the serial interface against the signal processor and the parallel interface
+against the serial one. A wrong guess there is a driver pointed at the wrong
+device. Banjo-Tooie's record names both halves of the video pair; the rest are
+left unnamed and recompiled, which is the safe answer, and now they are written
+down rather than silently decided.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is

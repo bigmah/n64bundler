@@ -85,12 +85,60 @@ static void write_memory_image(unsigned long frame) {
 }
 
 /// One vertical interrupt, and not a fraction more.
+// How many frames the *game* has finished, as against how many the video
+// interface has scanned out.
+//
+// A vertical interrupt happens sixty times a second whatever the game is
+// doing; a game that cannot build a frame in a sixtieth of a second simply
+// shows the previous one again. So the interesting rate -- the one that says
+// whether a runtime is keeping up, and the one `n64b-run --developer` reports
+// as display lists a second -- is how often the game hands the video interface
+// a different framebuffer to scan out. That is VI_ORIGIN changing, and the
+// debugger hands the registers over.
+static uint32_t last_origin;
+static uint32_t last_status;
+
+/// Frames the game has drawn so far, which is what a scripted press is counted
+/// in. `M64CMD_ADVANCE_FRAME` advances one of these: mupen64plus counts a frame
+/// in `new_frame()`, which its RSP calls once per graphics task, so this is one
+/// display list -- exactly what `n64b-run` counts for `N64B_SCREENSHOT_AFTER`
+/// and `N64B_INPUT`. Reads of the controller are not that clock: a game drawing
+/// twenty frames a second reads the pad on each of sixty video interrupts.
+static volatile unsigned long current_frame;
+
+/// The video interface's own registers, which say what is being scanned out
+/// and how.
+///
+/// VI_STATUS carries the pixel format, the anti-aliasing mode and whether the
+/// gamma is on, and is worth reporting because it is directly comparable: a
+/// runtime that models the video interface right prints the same word here as
+/// the console does.
+///
+/// VI_ORIGIN is worth *not* drawing a conclusion from. It alternates between
+/// the game's two framebuffers on every retrace whatever the frame rate is,
+/// because libultra keeps two `OSViContext`s and `__osViSwapContext` exchanges
+/// them each time -- so counting how often it changes measures that exchange
+/// and not the game. The game's frame rate is the frame count above, which
+/// mupen64plus advances once per graphics task.
+static void sample_vi(void) {
+    const uint32_t *vi = DebugMemGetPointer(M64P_DBG_PTR_VI_REG);
+    if (vi == NULL) return;
+    last_origin = vi[1];
+    last_status = vi[0];
+    if (getenv("REFSHOT_TRACE_VI") != NULL) {
+        static unsigned long n;
+        fprintf(stderr, "[vi] %lu origin 0x%08X status 0x%08X\n", n++, last_origin, last_status);
+    }
+}
+
 static void advance_one_frame(void) {
     pthread_mutex_lock(&state_lock);
     emu_state = M64EMU_RUNNING;
     pthread_mutex_unlock(&state_lock);
     CoreDoCommand(M64CMD_ADVANCE_FRAME, 0, NULL);
     wait_for_state(M64EMU_PAUSED);
+    current_frame++;
+    sample_vi();
 }
 
 // The pad the game sees, driven by N64B_INPUT in exactly the spelling
@@ -98,8 +146,10 @@ static void advance_one_frame(void) {
 //
 //   <frame>:<buttons>  with buttons joined by `+`, and an empty list a release.
 //
-// Frames are counted in reads of controller one, which is what the runtime
-// counts too.
+// Frames are the frames the game has drawn -- one display list -- which is what
+// the runtime counts too, and what a screenshot here is numbered by. Both
+// consoles have to be counted in the same thing or a script means two different
+// moments.
 struct scripted_frame {
     unsigned long at;
     unsigned short buttons;
@@ -122,12 +172,20 @@ static void parse_script(const char *spec) {
     for (const char *p = spec; *p; p++) if (*p == ',') commas++;
     script = calloc(commas, sizeof(*script));
     char *copy = strdup(spec);
-    for (char *entry = strtok(copy, ","); entry != NULL; entry = strtok(NULL, ",")) {
+    // strtok_r, and two save pointers, because the inner walk over a frame's
+    // buttons runs inside the outer walk over the frames. One strtok has one
+    // piece of state, so the first `a+b` would end the outer loop as well --
+    // which is a script of one entry, silently, and two consoles doing
+    // different things.
+    char *entries = NULL, *names = NULL;
+    for (char *entry = strtok_r(copy, ",", &entries); entry != NULL;
+         entry = strtok_r(NULL, ",", &entries)) {
         char *colon = strchr(entry, ':');
         if (colon == NULL) continue;
         *colon = '\0';
         struct scripted_frame frame = { strtoul(entry, NULL, 10), 0, 0, 0 };
-        for (char *name = strtok(colon + 1, "+"); name != NULL; name = strtok(NULL, "+")) {
+        for (char *name = strtok_r(colon + 1, "+", &names); name != NULL;
+             name = strtok_r(NULL, "+", &names)) {
             int known = 0;
             for (size_t i = 0; i < sizeof(kButtons) / sizeof(kButtons[0]); i++) {
                 if (strcmp(name, kButtons[i].name) == 0) { frame.buttons |= kButtons[i].bit; known = 1; }
@@ -170,7 +228,8 @@ EXPORT void CALL InitiateControllers(CONTROL_INFO info) {
 EXPORT void CALL GetKeys(int controller, BUTTONS *keys) {
     keys->Value = 0;
     if (controller != 0) return;
-    unsigned long now = pad_reads++;
+    pad_reads++;
+    unsigned long now = current_frame;
     const struct scripted_frame *current = NULL;
     for (int i = 0; i < script_count; i++) {
         if (script[i].at > now) break;
@@ -203,7 +262,14 @@ static void *frame_thread(void *arg) {
     for (int i = 0; i < at_count; i++) {
         const unsigned long wanted = (unsigned long)at_seconds[i];
         while (frame < wanted) { advance_one_frame(); frame++; }
-        fprintf(stderr, "[shot] frame %lu\n", frame);
+        // Both counts, because they are different clocks and a script written
+        // against one cannot be read against the other. `frame` is a vertical
+        // interrupt, sixty a second on both consoles; `pad` is a read of
+        // controller one, which happens once per frame the *game* runs. Their
+        // ratio is the game's own frame rate, and it is the number to compare
+        // against `n64b-run`'s display lists per second.
+        fprintf(stderr, "[shot] frame %lu, pad reads %lu, vi origin 0x%08X status 0x%08X\n",
+                frame, pad_reads, last_origin, last_status);
         CoreDoCommand(M64CMD_TAKE_NEXT_SCREENSHOT, 0, NULL);
         write_memory_image(frame);
         // The core writes the file when the frame it is on is finished, so

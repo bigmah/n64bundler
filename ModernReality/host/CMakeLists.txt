@@ -72,6 +72,10 @@ target_link_libraries(n64b-run PRIVATE
     modernreality_ultra_gaps
     rt64
     ${SDL2_LIBRARIES}
+    # For a picture of the window itself: the window server numbers the window
+    # and hands its contents back, which is the only screenshot that is what
+    # the game looks like. See host/src/window.cpp.
+    "-framework ApplicationServices"
 )
 
 # RT64's headers are shared with its shaders: the same file is compiled as

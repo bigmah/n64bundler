@@ -252,3 +252,31 @@ data_size = 0x800
 # module, with its own first instruction.
 [[function]]
 vram = 0x800137D4
+
+# Two libultra functions the signature database cannot tell apart.
+#
+# `osViGetCurrentFramebuffer` and `osViGetNextFramebuffer` are the same
+# function twice over -- disable interrupts, load a pointer, read its `framep`,
+# restore interrupts -- and the only thing that differs is which pointer:
+# `__osViCurr` at 0x80041540 or `__osViNext` at 0x80041544. That difference is
+# a `%lo` relocation, which is exactly the field a signature has to mask,
+# so both match both and whichever the database lists first wins twice.
+#
+# It matters because Banjo-Tooie's frame loop is built on the difference. At
+# 0x80015318 it reads the current framebuffer and at 0x80015320 the next one,
+# and waits for retraces until they agree -- which is how it finds out how long
+# the display processor took, which is what its frame pacing is computed from.
+# Named the same, the two calls return the same value, the wait never happens,
+# and the game paces itself against a measurement it never made.
+# Which is which comes from the one halfword they differ in: 0x8002F250 loads
+# the pointer at 0x80041540 and 0x8002FE30 the one at 0x80041544, and libultra's
+# `vimgr.c` defines `__osViCurr` before `__osViNext`, so the lower address is
+# the current one. Both are written down, because naming only the one that was
+# wrong leaves the analysis still reporting a tie it cannot settle.
+[[function]]
+vram = 0x8002F250
+name = "osViGetCurrentFramebuffer"
+
+[[function]]
+vram = 0x8002FE30
+name = "osViGetNextFramebuffer"

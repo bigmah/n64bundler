@@ -205,6 +205,31 @@ struct AnalysisReport {
         bool implemented = false;
     };
     std::vector<Resemblance> resemblances;
+    /// Addresses where two libultra functions fingerprint the same.
+    ///
+    /// A signature masks out every field the linker filled in, which is the
+    /// only way to match a library against a linked image -- and two functions
+    /// that differ only in *which* symbol they reference differ only in a
+    /// masked field. `osViGetCurrentFramebuffer` and `osViGetNextFramebuffer`
+    /// are that: disable interrupts, load a pointer, read its `framep`,
+    /// restore interrupts, and the pointer is `__osViCurr` in one and
+    /// `__osViNext` in the other. Both match both, and whichever the database
+    /// lists first wins at every site.
+    ///
+    /// Taking the first is a name that is right half the time and never says
+    /// so, which for a pair a game compares against each other is worse than
+    /// no name at all. So the analysis records the tie instead: an address, and
+    /// the names that could not be told apart there. One `[[function]]` line in
+    /// a title record settles it, and the record is where a person's reading of
+    /// the disassembly belongs.
+    struct Ambiguity {
+        uint32_t vram = 0;
+        /// Which of them the analysis went with, so the report says what the
+        /// module actually carries rather than only what it could have been.
+        std::string chosen;
+        std::vector<std::string> names;
+    };
+    std::vector<Ambiguity> ambiguous_names;
     /// Functions given their body back after a boundary cut them off from it.
     /// Each one is an entry point into a block that a later entry point also
     /// starts in, so the two overlap and each carries its own copy of the

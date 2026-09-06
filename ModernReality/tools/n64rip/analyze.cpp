@@ -430,6 +430,11 @@ void name_from_signatures(const Rom &rom, const SectionInfo &section,
         }
 
         const n64sig::Signature *best = nullptr;
+        // The names that matched just as well as the winner did. Usually one;
+        // more than one is a tie a fingerprint cannot break, because what
+        // separates those functions is a field the linker filled in and a
+        // signature therefore masks out.
+        std::vector<std::string> equally_good;
         for (const n64sig::Signature *candidate : candidates) {
             if (!n64sig::Database::matches(*candidate, code.data() + i, words - i)) {
                 continue;
@@ -438,11 +443,21 @@ void name_from_signatures(const Rom &rom, const SectionInfo &section,
             // one that explains more of the image.
             if (best == nullptr || candidate->words.size() > best->words.size()) {
                 best = candidate;
+                equally_good.assign(1, candidate->name);
+            } else if (candidate->words.size() == best->words.size() &&
+                       std::find(equally_good.begin(), equally_good.end(), candidate->name) ==
+                           equally_good.end()) {
+                equally_good.push_back(candidate->name);
             }
         }
 
         if (best == nullptr) {
             continue;
+        }
+        if (equally_good.size() > 1) {
+            std::sort(equally_good.begin(), equally_good.end());
+            report.ambiguous_names.push_back(
+                {section.vram + uint32_t(i * 4), best->name, std::move(equally_good)});
         }
 
         const uint32_t vram = section.vram + uint32_t(i * 4);
@@ -1930,6 +1945,21 @@ Analysis analyze(const Rom &rom, const n64sig::Database *signatures,
                                return false;
                            }),
             analysis.report.resemblances.end());
+
+        // Same for a tie between two signatures: a record that names the
+        // address has answered it, and repeating the question is noise.
+        analysis.report.ambiguous_names.erase(
+            std::remove_if(analysis.report.ambiguous_names.begin(),
+                           analysis.report.ambiguous_names.end(),
+                           [&](const AnalysisReport::Ambiguity &tie) {
+                               for (const FunctionRange &named : record->functions) {
+                                   if (named.vram == tie.vram && !named.name.empty()) {
+                                       return true;
+                                   }
+                               }
+                               return false;
+                           }),
+            analysis.report.ambiguous_names.end());
 
         adopt_microcode(rom, analysis, *record);
 

@@ -1312,13 +1312,16 @@ What is actually next:
    one of which is the audio microcode; on Mario Builder 64 they leave
    forty-one, so the rule is not ready. What separates them is probably the
    text's extent, which is also the number the record has to carry today.
-3. **The camera node Banjo-Tooie never walks.** Everything the game draws
-   goes through a projection ten and a half times too wide, because the one
-   handler that writes the camera's matrix is never dispatched. "The world
-   through the wrong lens" above has the measurement, what it is not, and the
-   one question left: why the scene graph this runtime walks has no node of
-   that kind in it. Until that is answered the game is playable and unlookable
-   at, which is the same thing as not playing.
+3. **Telling two libultra signatures apart.** Twenty-five addresses in
+   Banjo-Tooie match two names equally well, because what separates the two
+   functions is a field the linker filled in and a fingerprint has to mask. The
+   analyser says so now, which is the honest answer and not the useful one. The
+   useful one is in the archive the database was built from: a relocation names
+   its symbol, and two symbols defined in one object keep their order through
+   the linker -- so the site that references the lower address is the function
+   that references the earlier symbol. That needs `harvest` to record the
+   symbol behind each masked field, and a database rebuilt from a `libultra*.a`,
+   which is not a thing this machine has.
 4. **Playing Banjo-Tooie further than its opening.** It boots, plays its
    intro, reaches the file select, starts a game and plays the scene in
    Banjo's house, and runs its attract mode round six worlds without

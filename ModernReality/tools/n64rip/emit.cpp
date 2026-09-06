@@ -291,6 +291,22 @@ std::string emit_info_json(const Rom &rom, const Analysis &analysis,
         }
     }
     out << "  ],\n"
+        << "  \"ambiguous\": [\n";
+    // Where two libultra functions fingerprint the same, and so cannot be told
+    // apart by anything in the image. The name that was used is the first of
+    // them; a `[[function]]` line in a title record replaces it.
+    {
+        const std::vector<AnalysisReport::Ambiguity> &ties = analysis.report.ambiguous_names;
+        for (size_t i = 0; i < ties.size(); i++) {
+            out << "    { \"vram\": " << quote(hex(ties[i].vram)) << ", \"chosen\": "
+                << quote(ties[i].chosen) << ", \"names\": [";
+            for (size_t j = 0; j < ties[i].names.size(); j++) {
+                out << (j ? ", " : "") << quote(ties[i].names[j]);
+            }
+            out << "] }" << (i + 1 < ties.size() ? "," : "") << "\n";
+        }
+    }
+    out << "  ],\n"
         << "  \"notes\": [\n";
     for (size_t i = 0; i < analysis.report.notes.size(); i++) {
         out << "    " << quote(analysis.report.notes[i])

@@ -137,6 +137,20 @@ void print_analysis(const n64rip::Analysis &analysis) {
         std::printf("%zu boundaries merged where a branch crossed them\n",
                     report.merged_boundaries);
     }
+    if (!report.ambiguous_names.empty()) {
+        std::printf("%zu addresses match more than one libultra signature equally well. What "
+                    "separates those functions is a field the linker filled in, which a "
+                    "fingerprint has to ignore, so the image cannot say which is which:\n",
+                    report.ambiguous_names.size());
+        for (const auto &tie : report.ambiguous_names) {
+            std::printf("      0x%08X is any of:", tie.vram);
+            for (size_t i = 0; i < tie.names.size(); i++) {
+                std::printf("%s %s", i ? "," : "", tie.names[i].c_str());
+            }
+            std::printf("  (using %s)\n", tie.chosen.c_str());
+        }
+        std::printf("    One [[function]] line in a title record settles each.\n");
+    }
     if (!report.resemblances.empty()) {
         size_t worth = 0;
         for (const auto &near : report.resemblances) {

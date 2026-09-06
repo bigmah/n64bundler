@@ -1189,12 +1189,53 @@ call, advance by the size in the next word -- and it runs 5,182 times in
 twenty seconds here without ever seeing opcode 2. On the console it sees it
 constantly, and recurses into itself through it.
 
-So the question that is left is why the scene graph this runtime walks has no
-camera node in it. What has been ruled out on the way there, so that the next
-look does not start here:
+Four of those twenty-four handlers ever run here -- opcodes 3, 12, 13 and 17,
+and two more reached by index past the twenty-fourth -- where the console runs
+many more. The one that would write the camera is opcode 2, and `func_800DCF48`
+is referenced by exactly one word in the whole image: the table entry itself.
 
-- **The table is right.** All twenty-four handler addresses at `0x8012306C`
-  are identical on both consoles, and `0x800DCF48` is entry 2 in both.
+Where it stops is one step further in, and it is a strange place to stop. Take
+the stream at `0x803212F8`, which both consoles walk with the same registers
+and which holds the same bytes on both:
+
+```
+   +0x00  opcode  3  size 0x10
+   +0x10  opcode  3  size 0x10
+   +0x20  opcode  3  size 0x10
+   +0x30  opcode 10  size 0x18
+   +0x48  opcode  3  size 0x10
+   +0x58  opcode  3  size 0
+```
+
+Opcode 3's handler is called with each of `0x803212F8`, `+0x10`, `+0x20`,
+`+0x48` and `+0x58`, the same number of times each, and the interpreter is
+entered at `0x803212F8` that many times and at `+0x48` never -- so it is one
+walk, and it passes over `+0x30`. Table entry 10 is `0x800DD410` in memory at
+that moment. And the runtime is never
+once asked to look up `0x800DD410`: watching `get_function` over the whole
+`0x800DC000`-`0x800DE500` range for twenty seconds lists nine addresses and
+that is not one of them. The interpreter's translation is not the culprit
+either -- the branch-likely at the bottom of its loop is generated correctly,
+delay slot and all.
+
+The stream is not being rewritten under the walk, either: those bytes are the
+same at two frames six hundred apart, and the same on the console at two of
+its own.
+
+So the question that is left is why a walk that steps over a command does not
+dispatch it. One of those four measurements -- the handler's arguments, the
+interpreter's, the table's contents, the addresses the runtime is asked for --
+is lying, and finding which is the next thing to do. What has been ruled out on the way there, so that the next look
+does not start here:
+
+- **The table is right.** Every handler address at `0x8012306C` is identical
+  on both consoles, `0x800DCF48` is entry 2 in both, and the pointer to the
+  table at `0x8012CF8C` is the same too.
+- **The module has the handler.** `func_800DCF48` and `func_800DD410` are both
+  recovered boundaries, both are compiled into the module with their own
+  symbols, and the runtime's address map holds the right pointer for each.
+  Neither is one of the 890 functions the live recompiler translates, and the
+  live recompiler touches nothing inside the main segment at all.
 - **The command data is right.** The streams the interpreter walks hold the
   same bytes at the same addresses on both consoles.
 - **The projection helper is right.** `guFrustum` gets the same arguments

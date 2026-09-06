@@ -1300,6 +1300,19 @@ What has been ruled out at this level, so the next look does not start here:
 - **No data is being cut off.** The unpacked image holds nothing at all above
   the main segment's recorded end, so no rodata and no jump table is left
   outside it.
+One more thing the census found, and it is the narrowest handle on this yet.
+Of the 26,112 words of the game's own globals, exactly 132 are steady on both
+consoles and different, and 128 of them are one table: `0x8012CA48`, thirty-two
+entries of thirty-two bytes, filled on the console and **entirely zero here**.
+It is written by `func_800F2984`, which the console runs and this runtime never
+does, from `func_80013C80`, which this runtime never runs either, from one
+place inside `func_800DE498` -- which runs 6,767 times here. The block around
+that call reads a scene-graph node's flags at `+0x0A` and picks one of three
+tables by bits 1, 7 and 8, or none; the console picked the third and this
+runtime picks none. The same node's `+0x18` is the gate that takes the camera
+branch out. So the nodes this runtime builds carry empty flags, which is the
+same sentence as the objects carrying no model, one level down.
+
 - **It cannot be aligned by frame.** This runtime's boot spends about ten
   seconds live-recompiling while the game runs, so the two consoles are never
   at the same place at the same vertical interrupt, and a diff of the game's

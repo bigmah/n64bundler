@@ -1222,10 +1222,46 @@ The stream is not being rewritten under the walk, either: those bytes are the
 same at two frames six hundred apart, and the same on the console at two of
 its own.
 
-So the question that is left is why a walk that steps over a command does not
-dispatch it. One of those four measurements -- the handler's arguments, the
-interpreter's, the table's contents, the addresses the runtime is asked for --
-is lying, and finding which is the next thing to do. What has been ruled out on the way there, so that the next look
+The answer to that turned out to be that there is more than one table. Logging
+what the runtime is asked to look up, in order, alongside the handler's own
+arguments, shows the command at `+0x30` dispatching to `func_800DD504` -- and
+`func_800DD504` is entry 10 of a *different* table at `0x80123134`. There are
+three of them, listed at `0x80123198`, and `*(0x8012CF8C)` says which is
+current:
+
+```
+   table 0 at 0x8012306C   entry 2 = func_800DCF48, which sets the camera
+   table 1 at 0x801230D0
+   table 2 at 0x80123134   entry 2 = func_800DC628, which does nothing
+```
+
+They are three passes over the same scene graph. The console walks the node
+that carries the camera in pass 0; this runtime reaches it only in pass 2,
+where that opcode is a no-op.
+
+Following that up rather than down, the chain is short and every link is
+measured:
+
+- `func_800DE498` chooses between `func_800AE160` and `func_800ADCD0` on
+  whether `*(0x8012C824)` is set. `func_800AE160` runs 640 times in twenty
+  seconds on the console and never here.
+- `*(0x8012C824)` is written by one three-instruction function,
+  `func_800DF41C`, which the console calls with a node pointer and this
+  runtime never calls at all.
+- Its only caller that runs is `func_801015D0`, at `0x80101630`, and the call
+  is guarded: `func_80104248` is asked for the object's model and the camera
+  is skipped when it answers zero.
+- `func_80104248` reads a halfword at the object's `+0x8C` and looks it up in
+  a container at `*(0x80136E70)`. The container is there and the right shape
+  on both. The identifier is not: the three objects this runtime hands it --
+  `0x801CBD4C`, `0x801CC278`, `0x801CBDE8` -- all carry zero there, and the
+  console hands it a different object entirely.
+
+So the frontier is one question, and it is a much narrower one than the
+picture it came from: **the objects this runtime's camera pass iterates carry
+no model identifier, where the console's carry one.** That is the same shape
+as the empty world of a hundred commits ago -- an object that is there and is
+not furnished -- and it is where the next session starts. What has been ruled out on the way there, so that the next look
 does not start here:
 
 - **The table is right.** Every handler address at `0x8012306C` is identical

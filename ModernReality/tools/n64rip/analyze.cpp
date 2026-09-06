@@ -677,6 +677,87 @@ bool branches_escape(const Rom &rom, const SectionInfo &section,
     return false;
 }
 
+/// Whether a word hands control somewhere else and does not come back.
+///
+/// `jal` and `jalr` are missing on purpose: a call returns to the instruction
+/// after its delay slot, so a function ending in one still falls through.
+/// `syscall` is here because a game that dispatches through the exception
+/// handler -- see SyscallDispatch -- does not come back to the stub either,
+/// and its stubs are two instructions with no room for anything else.
+bool leaves_for_good(uint32_t word) {
+    const uint32_t op = word >> 26;
+    const uint32_t rs = (word >> 21) & 0x1F;
+    const uint32_t rt = (word >> 16) & 0x1F;
+    switch (op) {
+        case 0x00: { // SPECIAL
+            const uint32_t funct = word & 0x3F;
+            return funct == 0x08 || funct == 0x0C || funct == 0x0D; // jr, syscall, break
+        }
+        case 0x02:                                       // j
+            return true;
+        case 0x04:                                       // beq, and `b` is beq zero, zero
+        case 0x14:                                       // beql
+            return rs == 0 && rt == 0;
+        case 0x01:                                       // REGIMM
+            return rs == 0 && (rt == 0x01 || rt == 0x03); // bgez zero, bgezl zero
+        default:
+            return false;
+    }
+}
+
+/// Whether control runs off the end of the body this function was given.
+///
+/// A boundary the analysis invented can land anywhere, and `branches_escape`
+/// only catches the ones that cut a function where it branches. The quieter
+/// half of the same mistake is a cut through straight-line code: what is left
+/// above it has no branch to escape through and no return to reach, so nothing
+/// about it looks wrong. The recompiler translates it happily into a C
+/// function that computes a few values and falls off the end, which is to say
+/// one that returns whatever the last arithmetic happened to leave behind.
+///
+/// Banjo-Tooie's `atan2` is five instructions of exactly this:
+///
+///     80013B7C: mul.s  f16, f12, f12
+///     80013B80: nop
+///     80013B84: mul.s  f0, f14, f14
+///     80013B88: add.s  f0, f0, f16      <- what the caller reads as the angle
+///     80013B8C: sqrt.s f16, f0
+///     80013B90:                         <- a boundary nothing ever calls
+///
+/// The game converts a horizontal field of view to a vertical one with it, and
+/// is told that forty degrees across is eight hundred and forty thousand
+/// degrees down -- x^2 + y^2, the last thing `f0` held. Nothing crashes and
+/// nothing is reported. The world is drawn through a lens ten and a half times
+/// too wide for the rest of the game.
+///
+/// A function that has no way to leave itself is not a function, so this is
+/// asked of every recovered body: ignoring the padding at the end, the last
+/// instruction must either transfer control for good or sit in the delay slot
+/// of one that does.
+bool falls_off_the_end(const Rom &rom, const SectionInfo &section,
+                       const FunctionRange &function) {
+    if (function.size < 8) {
+        // One instruction and its delay slot is the smallest thing that can be
+        // judged at all, and a game's hand-written tables are full of them.
+        return false;
+    }
+    const auto word_at = [&](uint32_t vram) {
+        return rom.word(section.rom + (vram - section.vram));
+    };
+
+    // Trailing `nop`s are the alignment padding between one function and the
+    // next, and a final jump's delay slot is often one of them; neither says
+    // anything about whether the function ends.
+    uint32_t last = function.vram + function.size - 4;
+    while (last > function.vram && word_at(last) == 0) {
+        last -= 4;
+    }
+    if (leaves_for_good(word_at(last))) {
+        return false;
+    }
+    return last <= function.vram || !leaves_for_good(word_at(last - 4));
+}
+
 /// Give a function back the body a boundary cut it off from.
 ///
 /// Hand-written assembly reaches one body from several entry points, and each
@@ -733,6 +814,7 @@ bool settle_shared_tail(const Rom &rom, const SectionInfo &section,
     // The tail is code this function had not been looked at with, so both
     // questions are asked again over the whole of it.
     if (branches_escape(rom, section, starts, text_end, function) ||
+        falls_off_the_end(rom, section, function) ||
         needs_stub(rom, section, function)) {
         function.size = was;
         return false;
@@ -1103,7 +1185,8 @@ void recover_functions(const Rom &rom, SectionInfo &section, AnalysisReport &rep
             if (!function.known_as.empty()) {
                 report.stubbed_by_name.push_back(function.known_as);
             }
-        } else if (branches_escape(rom, section, final_starts, text_end_vram, function)) {
+        } else if (branches_escape(rom, section, final_starts, text_end_vram, function) ||
+                   falls_off_the_end(rom, section, function)) {
             if (settle_shared_tail(rom, section, final_starts, text_end_vram, function)) {
                 report.extended_over_shared_tail++;
             } else {
@@ -1194,7 +1277,8 @@ void restub_after_splitting(const Rom &rom, Analysis &analysis) {
             if (function.stub || !function.name.empty()) {
                 continue;
             }
-            if (branches_escape(rom, section, starts, text_end, function)) {
+            if (branches_escape(rom, section, starts, text_end, function) ||
+                falls_off_the_end(rom, section, function)) {
                 if (settle_shared_tail(rom, section, starts, text_end, function)) {
                     analysis.report.extended_over_shared_tail++;
                 } else {

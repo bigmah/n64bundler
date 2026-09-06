@@ -1074,8 +1074,9 @@ stopping.
 
 ### Where Banjo-Tooie is now
 
-It runs, and it cannot be looked at: see "The world through the wrong lens"
-below for the projection that spoils every frame of what follows.
+It runs and it draws its world correctly: the projection matrix matches a
+reference console's at the same game event, entry for entry. See "The world
+through the wrong lens" below for what it took to get there.
 
 ```
 boot -> unpack -> the intro cutscene -> the title screen -> the file select
@@ -1132,230 +1133,148 @@ game's version of this does not start here:
   cycle and the fifteen-thousandth display list is the same picture as the
   six-hundredth. There is no slow path being waited out.
 
-### The world through the wrong lens
+### The world through the wrong lens, and the five instructions behind it
 
-Banjo-Tooie boots, plays its opening, reaches its title screen and runs its
-attract mode -- and everything in the world is smeared. The terrain comes out
+Banjo-Tooie booted, played its opening, reached its title screen and ran its
+attract mode -- and everything in the world was smeared. The terrain came out
 as long radial ribbons converging on the middle of the screen, the camera
-looks like it is inside the ground, and the title screen shows a river where
-the console shows a rock face with a Jinjo standing in a cave.
+looked like it was inside the ground, and the title screen showed a river
+where the console shows a rock face with a Jinjo standing in a cave.
 
-It is one number, and it is the game's own.
+It was one number, and it was the game's own. This is how it was found, because
+the method matters more than the number.
 
-The display list loads a matrix at `0x8017AFB0` every frame, and decoding it on
-both consoles at the same moment says this:
+**Nothing can be compared until the two consoles are at the same place.** This
+runtime's boot spends about ten seconds live-recompiling while the game runs,
+so the two are never at the same place at the same vertical interrupt, and a
+diff of the game's memory at any pair of frames is already a hundred thousand
+words apart. Every early conclusion drawn from an unaligned pair had to be
+withdrawn -- that the game ran at a third of the speed (both run at twenty
+frames a second), that five class descriptors were empty here (all ids match),
+that a table this runtime never filled was the divergence (at the same instant
+it is *this* runtime that has filled it). The comparison only became worth
+anything once both sides stopped on the same *game event*: the two hundredth
+call to `func_800DE498`, with `N64B_TRACE_STOP_IN` here and `refdbg -e ... -k`
+there, each writing its eight megabytes at that instant.
+
+Aligned, the matrix the display list loads at `0x8017AFB0` says this:
 
 ```
               ours                                console
-    0.0625   0.0003   0.3845   0.3841     0.6602   0.0029   0.3843   0.3839
-    0.0000   0.1725  -0.0011  -0.0011     0.0000   1.8210  -0.0010  -0.0010
-    0.0750  -0.0002  -0.3205  -0.3201     0.7910  -0.0024  -0.3207  -0.3204
-  175.8986 -588.2182 135.0732 139.9237  1856.3077 -6221.4277 132.8866 137.7395
+    0.08572  -0.00610   0.23843   0.23817     0.90515  -0.06453   0.23843   0.23817
+    0.00000   0.17198   0.03712   0.03709     0.00000   1.81598   0.03712   0.03709
+    0.04660   0.01123  -0.43852  -0.43805     0.49216   0.11868  -0.43852  -0.43805
+   43.37396 -1169.66 -1224.12537 -1217.79749  457.96255 -12349.83 -1224.12537 -1217.79749
 ```
 
-The third and fourth columns agree to four figures. The first and second are
-smaller here by 10.56, both of them, exactly. Those two columns carry the
-projection's horizontal and vertical scale and nothing else, so what that
-factor is, is the field of view: `cot(fovy/2)` is 1.821 on the console, which
-is a 58 degree lens, and 0.1725 here, which is a 160 degree one. A fisheye
-that wide is the whole of what a player sees.
+The third and fourth columns are identical to five decimal places. Those carry
+the camera's position, its orientation and the near and far planes, so all of
+that is right. The first and second are smaller here by 10.559 -- the same
+factor in every entry, and the ratio *between* the two columns is identical on
+both, so the aspect is right too. Two columns and one scalar is the signature
+of `cot(fovy/2)`, which is the only term a perspective applies to x and y and
+to nothing else. 1.816 is a 58 degree lens; 0.172 is a 160 degree one.
 
-The renderer is drawing what it is given. RT64 identifies the microcode
-correctly -- `F3DEX2.NoN.fifo 2.08`, by its own hash of the text and data the
-task names -- and the matrix above is the game's, sitting in RDRAM, before
-anything of ours touches it.
+From there the chain is short, and each link was read out of the game's own
+code rather than guessed:
 
-Where the factor comes from is one function that never runs. The game keeps a
-small stack of float matrices at `0x8007B4F0`; the console fills three of them
-and hands the third to `guMtxF2L`, and that third one is the camera:
+- `n64b-port --watch 0x8017AFB0` names `func_8002ED00` -- `guMtxF2L` -- as what
+  writes the matrix, and a backtrace names its caller: `func_800E44FC`, which
+  builds the float matrix in the stack at `0x8007B4F0`.
+- `func_800E44FC` gets the scale from `camera->0xF4`, which the camera's setter
+  `func_800CA558` fills with `1/tan(fov/2)` from the angle at `camera->0xE4`.
+- Aligned, `camera->0xE4` is **30.70703 on the console and 843981.94 here**, and
+  `camera->0xF4` is 3.64201 there and 0.34494 here. 843981.9375 degrees reduces
+  mod 360 to 141.98, whose half-angle cotangent is 0.3449 -- which is exactly
+  the wrong scale, arrived at honestly by a trig function given nonsense.
+- The angle comes from a table at `0x80127690`, written by `func_800A8A88`,
+  called from `func_800C5094`, which converts a horizontal field of view to a
+  vertical one: `2 * atan2(h, w / tan(fovx/2))`. Its input is 40.0 on every
+  call, on both consoles.
 
-```
-    0.1158   0.0410  -0.5873   0.0000
-   -0.0210   0.5985   0.0376   0.0000
-    0.5883   0.0133   0.1169   0.0000
-  963.1885 6911.2490 -2756.3979  1.0000
-```
-
-Here the second and third entries are never written at all, and the game hands
-over the first, which is a fixed 0.28 scale and a translation of ten. The
-camera transform is not applied, and the projection that comes out of the
-multiplication is the one above.
-
-The entry is written by `func_80019AA0`, called from `func_800DCF48`, and
-`func_800DCF48` is reachable from exactly one place in the whole image: entry
-2 of a table of twenty-four handlers at `0x8012306C`. `func_800DE2A4` is the
-interpreter that dispatches through it -- read an opcode, index the table,
-call, advance by the size in the next word -- and it runs 5,182 times in
-twenty seconds here without ever seeing opcode 2. On the console it sees it
-constantly, and recurses into itself through it.
-
-Four of those twenty-four handlers ever run here -- opcodes 3, 12, 13 and 17,
-and two more reached by index past the twenty-fourth -- where the console runs
-many more. The one that would write the camera is opcode 2, and `func_800DCF48`
-is referenced by exactly one word in the whole image: the table entry itself.
-
-Where it stops is one step further in, and it is a strange place to stop. Take
-the stream at `0x803212F8`, which both consoles walk with the same registers
-and which holds the same bytes on both:
+So a function that should return an angle returned 843981. It is
+`func_80013B7C`, and the analysis had given it a size of `0x14`:
 
 ```
-   +0x00  opcode  3  size 0x10
-   +0x10  opcode  3  size 0x10
-   +0x20  opcode  3  size 0x10
-   +0x30  opcode 10  size 0x18
-   +0x48  opcode  3  size 0x10
-   +0x58  opcode  3  size 0
+    80013B7C: mul.s  f16, f12, f12
+    80013B80: nop
+    80013B84: mul.s  f0, f14, f14
+    80013B88: add.s  f0, f0, f16      <- what the caller reads as the angle
+    80013B8C: sqrt.s f16, f0
+    80013B90:                         <- a boundary nothing ever calls
 ```
 
-Opcode 3's handler is called with each of `0x803212F8`, `+0x10`, `+0x20`,
-`+0x48` and `+0x58`, the same number of times each, and the interpreter is
-entered at `0x803212F8` that many times and at `+0x48` never -- so it is one
-walk, and it passes over `+0x30`. Table entry 10 is `0x800DD410` in memory at
-that moment. And the runtime is never
-once asked to look up `0x800DD410`: watching `get_function` over the whole
-`0x800DC000`-`0x800DE500` range for twenty seconds lists nine addresses and
-that is not one of them. The interpreter's translation is not the culprit
-either -- the branch-likely at the bottom of its loop is generated correctly,
-delay slot and all.
+The real function runs to `0x80013C48`. Cut at `0x80013B90` it is five
+instructions of straight-line arithmetic that compute the hypotenuse it was
+going to divide by, and the recompiler translates that into a C function that
+falls off its end -- returning whatever was last left in `f0`, which is
+`x^2 + y^2`. Twelve call sites reach `0x80013B7C`; **nothing in the whole
+image calls `0x80013B90`**.
 
-The stream is not being rewritten under the walk, either: those bytes are the
-same at two frames six hundred apart, and the same on the console at two of
-its own.
+`analyze.cpp` already had the repair for this -- `settle_shared_tail`, which
+walks a function again from its own first instruction and gives it back a body
+a later entry point cut it off from. It never ran here. It was only ever asked
+of a function whose *branches* escaped its recorded extent, and five
+instructions of arithmetic have no branches to escape with. A boundary through
+straight-line code leaves nothing that looks wrong: no branch out, no return
+missing that anything was checking for, and a recompiled function that
+compiles cleanly and returns a plausible float.
 
-The answer to that turned out to be that there is more than one table. Logging
-what the runtime is asked to look up, in order, alongside the handler's own
-arguments, shows the command at `+0x30` dispatching to `func_800DD504` -- and
-`func_800DD504` is entry 10 of a *different* table at `0x80123134`. There are
-three of them, listed at `0x80123198`, and `*(0x8012CF8C)` says which is
-current:
+The fix is `falls_off_the_end`, asked of every recovered body alongside
+`branches_escape`: ignoring trailing padding, a function's last instruction
+must either transfer control for good or sit in the delay slot of one that
+does. A function with no way to leave itself is not a function. `syscall`
+counts as leaving, because a game that dispatches through the exception handler
+has stubs two instructions long with no room for anything else.
 
-```
-   table 0 at 0x8012306C   entry 2 = func_800DCF48, which sets the camera
-   table 1 at 0x801230D0
-   table 2 at 0x80123134   entry 2 = func_800DC628, which does nothing
-```
+On Banjo-Tooie it repairs five functions -- `0x80000440`, `0x80002AD0`,
+`0x80013B7C`, `0x8002E010`, `0x80081E00` -- and dissolves no boundary, invents
+no boundary and stubs nothing that was not stubbed before. The field of view
+becomes `0x41F5A801`, bit for bit the console's, and all sixteen entries of the
+projection matrix match the console at the same game event.
 
-They are three passes over the same scene graph. The console walks the node
-that carries the camera in pass 0; this runtime reaches it only in pass 2,
-where that opcode is a no-op.
+What this cost, and what is worth keeping from it: a long chain of downstream
+symptoms was measured and written up as the frontier before the cause was
+found -- a camera handler that "never runs", scene-graph nodes with empty
+flags, objects carrying no model identifier, 1,456 functions the console
+entered and this runtime did not. Some of that was phase artifact and some was
+real consequence, but none of it was the cause, and following it down was the
+long way round. The thing that actually worked was refusing to compare
+anything until both consoles were stopped on the same game event, and then
+reading the game's own code upward from the wrong number rather than guessing
+at what might produce it.
 
-Following that up rather than down, the chain is short and every link is
-measured:
+What was ruled out on the way, so the next look does not start here:
 
-- `func_800DE498` chooses between `func_800AE160` and `func_800ADCD0` on
-  whether `*(0x8012C824)` is set. `func_800AE160` runs 640 times in twenty
-  seconds on the console and never here.
-- `*(0x8012C824)` is written by one three-instruction function,
-  `func_800DF41C`, which the console calls with a node pointer and this
-  runtime never calls at all.
-- Its only caller that runs is `func_801015D0`, at `0x80101630`, and the call
-  is guarded: `func_80104248` is asked for the object's model and the camera
-  is skipped when it answers zero.
-- `func_80104248` reads a halfword at the object's `+0x8C` and looks it up in
-  a container at `*(0x80136E70)`. The container is there and the right shape
-  on both. The identifier is not: the three objects this runtime hands it --
-  `0x801CBD4C`, `0x801CC278`, `0x801CBDE8` -- all carry zero there, and the
-  console hands it a different object entirely.
-
-So the frontier is one question, and it is a much narrower one than the
-picture it came from: **the objects this runtime's camera pass iterates carry
-no model identifier, where the console's carry one.** At the same point in the
-game the console's camera pass runs on eighteen objects and this runtime's on
-three.
-
-Asking the census the same question over the whole segment says how wide that
-is. Twenty-five seconds each side, the stub table excluded: **1,456 functions
-the console entered and this runtime never did, and one the other way.** A
-strict subset is the signature of a game deciding not to do things rather than
-of anything being corrupted, and the gates are all of the same shape --
-
-- `func_800DE498` reads a scene-graph node's `+0x18` and skips its whole block
-  when it is zero, which takes both the camera branch (`func_800AE160`) and
-  the branch beside it (`func_800ADCD0`) out at once; it runs 3,274 times here
-  and neither branch ever runs.
-- `func_800EA628` runs 4,270 times here and reaches none of the seven
-  functions it calls.
-- `func_800D674C` runs 5,205 times here and reaches neither of its two, which
-  are guarded on an object's `+0x2C` being non-zero.
-
--- and the values behind those gates come from the game's data rather than
-from any instruction: nothing in the image ORs the bits in.
-
-What has been ruled out at this level, so the next look does not start here:
-
-- **It is not time starvation.** Running the vertical interrupt at fifteen
-  hertz gives the game four times the wall clock per frame and changes the
-  projection not at all.
-- **It is not the asset table.** The list of loaded cartridge files at
-  `0x8012B800` has nineteen entries on the console and seventeen here, and
-  eleven of the offsets are the same on both -- so files load, and different
-  ones are asked for.
-- **It is not memory pressure.** The allocator runs 156 times here in
-  twenty-two seconds against 160 there.
-- **No code is being cut short.** Not one of the 9,741 recovered functions has
-  a branch that leaves its recorded extent, and the live recompiler never ends
-  an overlay function at a `jr $ra` with a jump table above it -- the one way
-  its length heuristic could truncate a switch, since a jump table's cases are
-  reached indirectly and so never widen the "furthest branch" it stops on.
-- **No data is being cut off.** The unpacked image holds nothing at all above
-  the main segment's recorded end, so no rodata and no jump table is left
-  outside it.
-One more thing the census found, and it is the narrowest handle on this yet.
-Of the 26,112 words of the game's own globals, exactly 132 are steady on both
-consoles and different, and 128 of them are one table: `0x8012CA48`, thirty-two
-entries of thirty-two bytes, filled on the console and **entirely zero here**.
-It is written by `func_800F2984`, which the console runs and this runtime never
-does, from `func_80013C80`, which this runtime never runs either, from one
-place inside `func_800DE498` -- which runs 6,767 times here. The block around
-that call reads a scene-graph node's flags at `+0x0A` and picks one of three
-tables by bits 1, 7 and 8, or none; the console picked the third and this
-runtime picks none. The same node's `+0x18` is the gate that takes the camera
-branch out. So the nodes this runtime builds carry empty flags, which is the
-same sentence as the objects carrying no model, one level down.
-
-- **It cannot be aligned by frame.** This runtime's boot spends about ten
-  seconds live-recompiling while the game runs, so the two consoles are never
-  at the same place at the same vertical interrupt, and a diff of the game's
-  own memory at any early pair of frames is already a hundred thousand words
-  apart. Any comparison from here has to be aligned on the game's own state. What has been ruled out on the way there, so that the next look
-does not start here:
-
-- **The table is right.** Every handler address at `0x8012306C` is identical
-  on both consoles, `0x800DCF48` is entry 2 in both, and the pointer to the
-  table at `0x8012CF8C` is the same too.
-- **The module has the handler.** `func_800DCF48` and `func_800DD410` are both
-  recovered boundaries, both are compiled into the module with their own
-  symbols, and the runtime's address map holds the right pointer for each.
-  Neither is one of the 890 functions the live recompiler translates, and the
-  live recompiler touches nothing inside the main segment at all.
-- **The command data is right.** The streams the interpreter walks hold the
-  same bytes at the same addresses on both consoles.
-- **The projection helper is right.** `guFrustum` gets the same arguments
-  here as there -- l=-608, r=608, b=-456, and the same output address -- and
-  writes the same matrix.
+- **It is not the renderer.** RT64 identifies the microcode correctly --
+  `F3DEX2.NoN.fifo 2.08`, by its own hash of the text and data the task names
+  -- and the matrix above is the game's, sitting in RDRAM, before anything of
+  ours touches it.
+- **The projection helpers are right.** `guFrustum` gets the same arguments
+  here as there -- l=-608, r=608, b=-456 -- and writes the same matrix.
 - **The viewport is right.** Scale (152, 86, 127.8) and centre (152, 114,
   127.8) on both.
 - **The display list agrees for a long way.** The two consoles' lists are
-  identical, operand for operand, for the first 507 commands -- the same
-  framebuffer, the same scissor, the same sub-list addresses -- and part when
-  they branch into the per-frame object arena.
-- **The frame rate is not the problem.** Both consoles run this part of the
-  game at about twenty frames a second: `osViSwapBuffer` is called 327 times
-  in twenty seconds there, and the display list goes out every three vertical
-  interrupts here. The gap between them is a boot that takes ten seconds
-  longer, not a game that runs slow.
-- **Nor is the plumbing.** Retrace messages are delivered at sixty a second
-  with none dropped and a mean delay of fifteen microseconds; the game's own
-  code runs for twenty-five milliseconds in every second and waits for the
-  rest; thread handoffs cost thirteen milliseconds a second across nine
-  hundred of them.
+  identical, operand for operand, for the first 507 commands, and both load
+  the same three matrix addresses.
+- **It is not time starvation.** Running the vertical interrupt at fifteen
+  hertz gives the game four times the wall clock per frame and changed the
+  projection not at all.
+- **It is not memory pressure.** The allocator runs 156 times here in
+  twenty-two seconds against 160 there.
+- **The frame rate was never the problem.** Both consoles run this part of the
+  game at about twenty frames a second. The gap between them is a boot that
+  takes ten seconds longer, not a game that runs slow.
 
-The tools that answered this are in `ModernReality/tools/refconsole`, and two
-of them are new: `refshot`, which screenshots the reference console at a named
-*frame* rather than a named second and writes its memory out beside the
-picture, and `n64dl.py`, which turns one of those images back into the display
-list the game asked for. `n64b-run` grew `N64B_SCREENSHOT_RAM` to write the
-same thing at the same frames, which is what makes the two comparable at all.
+The tools that answered this are in `ModernReality/tools/refconsole`: `refshot`,
+which screenshots the reference console at a named *frame* rather than a named
+second and writes its memory out beside the picture; `refdbg`, which stops it
+on an address after a given number of hits and dumps memory there; `n64dl.py`,
+which turns one of those images back into the display list the game asked for,
+and decodes a fixed-point matrix; and `censusdiff.py`, which diffs an execution
+census against a trace. `n64b-run` grew `N64B_SCREENSHOT_RAM`, `N64B_TRACE_STOP_RAM`
+and `N64B_TRACE_STOP_IN` to write the same thing at the same *game event*, which
+is what makes the two comparable at all.
 
 ## Roadmap
 

@@ -130,6 +130,35 @@ void print_registers(const void *ctx) {
     }
 }
 
+/// The console's eight megabytes at the moment one function has run a given
+/// number of times.
+///
+/// This is the only alignment two consoles running the same cartridge can be
+/// held to. Wall clock does not work -- a cached interpreter and compiled code
+/// do not reach the same moment at the same second. Nor does the vertical
+/// interrupt: this runtime spends the first ten seconds of a compressed
+/// cartridge live-recompiling while the game runs, so the two are never at the
+/// same frame at the same time. What both consoles can be stopped at is the
+/// game's own execution -- the hundredth call to a named function -- and
+/// `refdbg -e <addr> -k 99 -n 1 -D <path>` stops the other one at exactly the
+/// same place. Two images taken that way are the same moment of the same game,
+/// and a diff of them says what the two disagree about.
+void write_memory_at_stop(const char *name) {
+    const char *path = std::getenv("N64B_TRACE_STOP_RAM");
+    if (path == nullptr || watched_rdram == nullptr) {
+        return;
+    }
+    std::FILE *out = std::fopen(path, "wb");
+    if (out == nullptr) {
+        std::fprintf(stderr, "note: could not write %s\n", path);
+        return;
+    }
+    std::fwrite(watched_rdram, 1, 8u * 1024u * 1024u, out);
+    std::fclose(out);
+    std::fprintf(stderr, "note: wrote %s, the console's memory as %s ran.\n", path, name);
+    std::fflush(stderr);
+}
+
 void print_backtrace(const char *name, const void *ctx) {
     void *frames[24];
     const int depth = backtrace(frames, 24);
@@ -138,6 +167,18 @@ void print_backtrace(const char *name, const void *ctx) {
     backtrace_symbols_fd(frames, depth, 2);
     print_registers(ctx);
     dump_memory("where it stopped");
+    write_memory_at_stop(name);
+}
+
+/// Whether `N64B_TRACE_STOP` is about this function.
+///
+/// Without a name it is about whichever function reaches the count first,
+/// which is what "where is it stuck" wants. With one -- `N64B_TRACE_STOP_IN`
+/// -- it is about that one alone, which is what an alignment wants: the
+/// hundredth call to *this* function and no other.
+bool stop_wanted(const char *name) {
+    static const char *only = std::getenv("N64B_TRACE_STOP_IN");
+    return only == nullptr || std::strcmp(only, name) == 0;
 }
 
 void record(const char *name, const void *ctx) {
@@ -147,7 +188,7 @@ void record(const char *name, const void *ctx) {
         if (entry.name == name) {
             entry.hits++;
             entry.last_seen = next.load(std::memory_order_relaxed);
-            if (entry.hits == backtrace_at()) {
+            if (entry.hits == backtrace_at() && stop_wanted(name)) {
                 print_backtrace(name, ctx);
             }
             return;

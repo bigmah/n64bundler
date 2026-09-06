@@ -25,9 +25,11 @@ a boundary, and then **runs**: the opening cutscene over Spiral Mountain with
 its text cards and its talking, the title screen, the file select in Banjo's
 house, and a new game from there into the scene indoors with the characters
 and the dialogue and the HUD. Left alone it runs its attract mode round six
-worlds and comes back. It is not yet playable, because the world is drawn
-through a lens ten and a half times too wide -- one handler that writes the
-camera's matrix is never dispatched, and PLAN.md has the measurement. Everything around all three works: a ROM is analysed,
+worlds and comes back. For a while it did all of that through a lens ten and a
+half times too wide, which turned out to be five instructions of `atan2` cut
+off from the rest of it by a boundary nothing called; the world it draws now
+matches a reference console's to every digit of the projection matrix.
+Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what
 is still missing.

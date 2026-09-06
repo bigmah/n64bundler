@@ -276,16 +276,66 @@ EXPORT void CALL RenderCallback(void) {}
 // from n64b-run are the same moment of the same game rather than two moments
 // that happened to take the same number of seconds. Wall-clock cannot do this:
 // one console runs a cached interpreter and the other runs compiled code.
+/// The frame to stop the core on next, when it is running flat out.
+///
+/// Stepping to a frame costs a round trip through the frontend for every frame
+/// in between -- five to eight a second, so twenty minutes to reach a moment
+/// the game gets to in six, which is why a comparison against this console
+/// stops where it stops. The core will count its own frames if asked:
+/// `M64CMD_SET_FRAME_CALLBACK` is called from the same `new_frame()` that
+/// `M64CMD_ADVANCE_FRAME` pauses in, and calling for a pause from inside it is
+/// the same thing that command does. So the core runs at its own speed and
+/// stops only on the frames that were asked for.
+static volatile unsigned long stop_at = 0;
+static volatile int running_free = 0;
+
+static void frame_reached(unsigned int index) {
+    current_frame = index;
+    if (running_free && stop_at != 0 && (unsigned long)index + 1 >= stop_at) {
+        CoreDoCommand(M64CMD_PAUSE, 0, NULL);
+    }
+}
+
+/// Run until the core has finished `wanted` frames, however far away that is.
+static void run_to_frame(unsigned long wanted) {
+    if (current_frame + 1 >= wanted) {
+        return;
+    }
+    stop_at = wanted;
+    running_free = 1;
+    pthread_mutex_lock(&state_lock);
+    emu_state = M64EMU_RUNNING;
+    pthread_mutex_unlock(&state_lock);
+    CoreDoCommand(M64CMD_RESUME, 0, NULL);
+    wait_for_state(M64EMU_PAUSED);
+    running_free = 0;
+    sample_vi();
+}
+
 static void *frame_thread(void *arg) {
     (void)arg;
     wait_for_state(M64EMU_RUNNING);
     CoreDoCommand(M64CMD_PAUSE, 0, NULL);
     wait_for_state(M64EMU_PAUSED);
 
+    // Stepping is exact and slow; running is fast and stops a frame either
+    // side. Both land on the frame that was asked for, so the fast one is the
+    // default and `REFSHOT_STEP` is there for the case that wants every frame
+    // walked through.
+    const int step = getenv("REFSHOT_STEP") != NULL;
+    if (!step) {
+        CoreDoCommand(M64CMD_SET_FRAME_CALLBACK, 0, (void *)frame_reached);
+    }
+
     unsigned long frame = 0;
     for (int i = 0; i < at_count; i++) {
         const unsigned long wanted = (unsigned long)at_seconds[i];
-        while (frame < wanted) { advance_one_frame(); frame++; }
+        if (step) {
+            while (frame < wanted) { advance_one_frame(); frame++; }
+        } else {
+            run_to_frame(wanted);
+            frame = current_frame + 1;
+        }
         // Both counts, because they are different clocks and a script written
         // against one cannot be read against the other. `frame` is a vertical
         // interrupt, sixty a second on both consoles; `pad` is a read of

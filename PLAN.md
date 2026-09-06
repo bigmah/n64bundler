@@ -1448,7 +1448,16 @@ What is actually next:
    that references the earlier symbol. That needs `harvest` to record the
    symbol behind each masked field, and a database rebuilt from a `libultra*.a`,
    which is not a thing this machine has.
-4. **Playing Banjo-Tooie further than its opening.** It boots, plays its
+4. **A reference console that does not have to be stepped.** `refshot` reaches
+   a frame by pausing the core and advancing one frame at a time, which is a
+   round trip through the frontend per frame: five to eight a second, so twenty
+   minutes to reach a moment the game gets to in six. That is the whole reason
+   the comparison above stops seven minutes into the game rather than an hour
+   in. mupen64plus has `M64CMD_SET_FRAME_CALLBACK`, which the same `new_frame()`
+   calls without pausing anything -- so the core could run flat out, count its
+   own frames, and pause only on the ones asked for. Ten times faster is the
+   difference between checking six frames of a game and checking sixty.
+5. **Playing Banjo-Tooie further than its opening.** It boots, plays its
    intro, reaches the file select, starts a game and plays the scene in
    Banjo's house, and runs its attract mode round six worlds without
    stopping. What nobody has done is play it for an hour: a game this size
@@ -1459,13 +1468,13 @@ What is actually next:
    a crash: about a hundred seconds in, ultramodern's timer thread takes a
    bad address, reading an `OSTimer` field as a host offset rather than a
    console one.
-5. **Measuring an unpacked segment rather than being told it.** The two numbers
+6. **Measuring an unpacked segment rather than being told it.** The two numbers
    a `[[unpacked]]` block carries were both found mechanically — the entry is
    what the runtime reported it could not find, and the extent is every word
    that differs from what IPL3 copied. Both could be done by the analyser
    instead of by hand, and then a compressed cartridge would need no record at
    all beyond the one driver name.
-6. **More titles.** Three is not a sample. Everything the analyser knows how to
+7. **More titles.** Three is not a sample. Everything the analyser knows how to
    do it learned from Super Mario 64, Mario Builder 64 and Banjo-Tooie, and the
    next ROM will teach it something else.
 

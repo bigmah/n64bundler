@@ -31,9 +31,12 @@ off from the rest of it by a boundary nothing called; the world it draws now
 matches a reference console's to every digit of the projection matrix. Held up
 against that console frame by frame — one script driving both — it draws the
 same title screen, the same attract mode round all six worlds, the same file
-select, and the same seven minutes of opening: the same dialogue on the same
+select, the same thirteen minutes of opening — the same dialogue on the same
 line, the same cameras, the same geometry down to two objects that looked like
-renderer bugs here until the console drew them in the same place. And one
+renderer bugs here until the console drew them in the same place — and, at frame 15800 on
+both, the same Spiral Mountain once the game hands over the controls: Banjo on
+the cobbled path with the same shadow under him, Bottles' ghost over the tunnel
+mouth, the same terrain and the same light. And one
 display list of 3,383 commands that is the same commands in the same order on
 both. Getting to that comparison meant fixing the instruments first: a scripted
 pad that pressed one button and then stopped, a "frame" that meant one thing on

@@ -1366,6 +1366,28 @@ for they are the same picture:
   black polygon across his face, which also looked wrong here until the console
   drew the same one.
 
+And past the opening, into the game itself:
+
+- **8000**, thirteen minutes in: Klungo, Grunty's skeleton and Blobbelda in the
+  rain, the same camera and the same poses -- and the spell book's text is
+  legible here and blurred there, because RT64 filters textures less than
+  glide64mk2 does.
+- **15800**, free roam in Spiral Mountain, thirteen minutes in and past the
+  whole opening: the same frame on both consoles, and the same picture. Banjo
+  and Kazooie stand in the same place on the cobbled path with the same shadow
+  under them, Bottles' ghost hangs over the tunnel mouth with the same glow, and
+  the mole hill, the yellow fence, the stone arch, the ladder up the cliff, the
+  grass and the light are the same. That is the game being played rather than
+  watched, which is the last thing the comparison had not covered.
+
+The frame numbers do drift in between. Through the timed parts of the opening
+the two consoles fall as much as twelve hundred frames apart -- at 11000 this
+one is a line of dialogue ahead, at 14600 it is a scene behind -- and then they
+converge again at 15800, because a game waiting on a player who is not pressing
+anything is a game that has stopped advancing. So the free-roam match is an
+exact test of what is drawn and no test at all of when. What makes a cutscene
+run at a different pace here is not measured, and is the next thing to look at.
+
 Two things that looked like bugs and were not is the point. A picture of a
 low-polygon game is full of things that look like a renderer having a bad day,
 and the only way to tell is to have the other console draw the same frame.

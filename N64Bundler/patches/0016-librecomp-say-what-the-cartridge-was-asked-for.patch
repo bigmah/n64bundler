@@ -1,0 +1,66 @@
+librecomp: say what the cartridge was asked for
+
+A transfer here costs nothing -- the bytes are in a host buffer and the copy is
+a memcpy -- where on the console it costs the time the parallel interface takes
+to clock them out. Whether that is where a game's loading pauses go is a
+question about the game rather than about the runtime, so the runtime can answer
+it: N64B_PI_LOG reports every transfer with its address, its size and a running
+total against the wall clock.
+
+It was worth the twenty lines. Banjo-Tooie's loading pauses last two to three
+seconds on a console and the bursts of cartridge traffic behind them are 0.6 to
+0.9 MB, which is a sixth of a second at the 5.4 MB/s a cartridge manages -- ten
+megabytes over the whole of its first two and a half minutes. Modelling the
+parallel interface's own timing would have been a day's work for five per cent
+of the difference, and the pauses are the processor decompressing a world.
+
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -4,6 +4,9 @@
+ #include <cstring>
+ #include <string>
+ #include <mutex>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include "recomp.h"
+ #include "librecomp/addresses.hpp"
+ #include "librecomp/game.hpp"
+@@ -263,10 +266,37 @@
+ void ultramodern::join_saving_thread() {
+     if (save_context.saving_thread.joinable()) {
+         save_context.saving_thread.join();
++    }
++}
++
++/// What the cartridge was asked for, and when.
++///
++/// A transfer here costs nothing: the bytes are already in a host buffer and
++/// the copy is a memcpy. On the console it costs the time the parallel
++/// interface takes to clock them out, and a game that loads a world waits for
++/// exactly that. Whether that is where the console's loading pauses go is a
++/// question about this game rather than about the runtime, so the runtime can
++/// answer it: `N64B_PI_LOG` reports every transfer, and the running total
++/// against the wall clock says how many bytes a pause is made of.
++static void report_dma(uint32_t physical_addr, uint32_t size, uint32_t direction) {
++    static const bool wanted = std::getenv("N64B_PI_LOG") != nullptr;
++    if (!wanted) {
++        return;
+     }
++    using namespace std::chrono;
++    static const auto started = steady_clock::now();
++    static uint64_t total = 0;
++    static uint64_t transfers = 0;
++    total += size;
++    transfers++;
++    const double at = duration<double>(steady_clock::now() - started).count();
++    std::fprintf(stderr, "pi: %8.3fs %s 0x%08X %7u bytes (%llu transfers, %.2f MB total)\n",
++                 at, direction == 0 ? "read " : "write", physical_addr, size,
++                 (unsigned long long)transfers, double(total) / (1024.0 * 1024.0));
+ }
+ 
+ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
++    report_dma(physical_addr, size, direction);
+     // TODO asynchronous transfer
+     // TODO implement unaligned DMA correctly
+     if (direction == 0) {

@@ -43,6 +43,21 @@ pad that pressed one button and then stopped, a "frame" that meant one thing on
 one console and something three times shorter on the other, and a screenshot
 taken out of the console's memory rather than off the screen, which is a
 picture with the characters missing from it. [PLAN.md](PLAN.md) has all three.
+
+**And then it ran too fast.** Every frame matched and the game still played
+wrong, because a frame-numbered comparison cannot see time: two pictures
+numbered 1300 are the same moment however long each console took to reach it.
+Banjo-Tooie asks for a frame every two retraces, misses that on a console about
+a third of the time because a frame of its own code does not fit in two, and
+never missed here -- so its attract mode, whose recorded playback advances a
+fixed step per frame, ran at thirty frames a second against a console's
+twenty-six and finished thirteen seconds early, with none of its three loading
+pauses. The recompiler now counts the instructions it recompiled, a basic block
+at a time, and the runtime holds them to 23.4 million a second, which is what an
+R4300 manages. Every landmark of the first two and a half minutes now lands
+within two seconds of the reference console's, and the attract mode takes
+eighty-three seconds against its eighty-two. `N64B_CPU_RATE=0` gives back the
+speed a recompilation is for.
 Everything around all three works: a ROM is analysed,
 recompiled, compiled, added to the library and launched into a window with the
 renderer up. [PLAN.md](PLAN.md) has the design, the measured numbers, and what

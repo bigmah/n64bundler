@@ -483,6 +483,53 @@ int main(int argc, char **argv) {
     graphics.ds_option = 1;
     ultramodern::renderer::set_graphics_config(graphics);
 
+    // How fast the console's processor was.
+    //
+    // A recompilation runs the game's own code hundreds of times faster than
+    // the R4300 did, and for a game that paces itself against how long its work
+    // took, that is not a free improvement. Banjo-Tooie asks the video
+    // interface for a frame every two retraces. On a console it misses that
+    // target about a third of the time, because a frame's worth of its own code
+    // does not fit in two retraces; here it never missed, so it ran at a flat
+    // thirty frames a second where a console manages twenty-six, and its
+    // attract mode played through in sixty-nine seconds where a console takes
+    // eighty-two. Its loading pauses were not there at all: three seconds of a
+    // console decompressing a world is a tenth of a second of this. Holding the
+    // recompiled code to a rate gives all of that back.
+    //
+    // The number is instructions a second rather than cycles, because what an
+    // R4300 retires in a second is a fact about a processor waiting on memory
+    // and not one from a manual. It is a measurement: with the code held to
+    // this, every landmark of Banjo-Tooie's first two and a half minutes --
+    // the title screen's length, the frame the attract mode starts at, all
+    // three of its loading pauses, the frame it ends at -- lands within two
+    // seconds of where the reference console puts it, and the attract mode
+    // takes eighty-three seconds against the console's eighty-two.
+    //
+    // It agrees with mupen64plus, which is the other way of arriving at it: the
+    // core advances the COP0 count register twice per instruction and that
+    // register ticks at half of the R4300's 93.75 MHz, which is this number.
+    constexpr double r4300_instructions_per_second = 23.4e6;
+
+    // `N64B_CPU_RATE` overrides it, and zero lifts it entirely -- which is a
+    // game running as fast as the host can carry it, the thing a static
+    // recompilation is for and the thing that makes this game play too quickly.
+    double cpu_rate = r4300_instructions_per_second;
+    if (const char *rate = std::getenv("N64B_CPU_RATE")) {
+        cpu_rate = std::strtod(rate, nullptr);
+    }
+    ultramodern::set_cpu_instruction_rate(cpu_rate);
+    if (options.developer) {
+        if (cpu_rate > 0.0) {
+            std::fprintf(stderr, "note: holding the game's code to %.1f million instructions a second, "
+                                 "which is what an R4300 managed.\n",
+                         cpu_rate / 1e6);
+        } else {
+            std::fprintf(stderr, "note: the game's code runs as fast as this machine can carry it, "
+                                 "which is faster than the console ever did.\n");
+        }
+    }
+
     // librecomp reads its own command line to decide which registered game to
     // start. There is exactly one, and it starts immediately.
     std::vector<char *> runtime_argv;

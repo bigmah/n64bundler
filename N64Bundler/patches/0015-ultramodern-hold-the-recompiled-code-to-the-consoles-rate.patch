@@ -1,0 +1,132 @@
+ultramodern: hold the recompiled code to the console's rate
+
+The counterpart to 0014, which made the recompiled code say how much of the
+console's processor it stood for. This spends it.
+
+`set_cpu_instruction_rate` gives the runtime a rate in instructions a second;
+`recomp_cycle_spend` is called when that many have gone by and sleeps the thread
+until the wall clock has caught up with the console's. Holding the thread is
+right rather than merely convenient: the console has one processor, and while it
+is working nothing else in the game runs either, which is exactly what a game
+thread parked here does. The runtime's own threads -- the video interface, the
+graphics thread, audio -- carry on, because they are the parts that are not the
+processor.
+
+Time is spent, not saved. When the wall clock has run ahead, because the game
+was waiting on something rather than working, the credit is dropped and the
+count re-based on the present; otherwise a game that idled for a second would be
+allowed to run a second's worth of code at once afterwards.
+
+The rate itself is not here, because it is a measurement and not a
+specification: what an R4300 retires in a second is a fact about a processor
+waiting on memory. `n64b-run` sets it, and PLAN.md has how it was arrived at and
+what it does to Banjo-Tooie's first two and a half minutes.
+
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -111,6 +111,15 @@
+ void sleep_milliseconds(uint32_t millis);
+ void sleep_until(const std::chrono::high_resolution_clock::time_point& time_point);
+ 
++/// Hold the recompiled code to the rate the console's processor managed.
++///
++/// Zero, the default, is as fast as the host can go -- which is what a
++/// recompilation is for, and also why a game that paces itself against its own
++/// work runs faster here than it ever did. A positive number is instructions a
++/// second; see the cycle counting beside `recomp_preempt` in scheduling.cpp.
++void set_cpu_instruction_rate(double per_second);
++double get_cpu_instruction_rate();
++
+ // Graphics
+ uint32_t get_target_framerate(uint32_t original);
+ uint32_t get_display_refresh_rate();
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -42,6 +42,87 @@
+     ultramodern::check_running_queue(PASS_RDRAM1);
+ }
+ 
++// --- The console's processor, at the console's speed --------------------------
++//
++// A game paces itself against the video interface: it does a frame's work and
++// then waits for the retraces it asked for. On the console the work is often
++// the longer of the two, so the game misses the retrace it aimed at and the
++// picture stands for one more sixtieth of a second; recompiled, the work takes
++// almost nothing and the game never misses. Both run the same frames, and the
++// one that never misses runs through them faster than the console ever did --
++// which is an attract mode that finishes early and a loading pause that is not
++// there.
++//
++// So the recompiled code counts the instructions it stands for, a basic block
++// at a time, and this holds it to the rate a 93.75 MHz R4300 managed. What that
++// rate is is a measurement rather than a specification -- the processor retires
++// rather less than one instruction per cycle, because it is waiting on memory --
++// so it is a number the host sets and `n64b-run` explains where it got.
++//
++// Nothing here runs at all until a rate is set: `recomp_cycle_budget` starts at
++// the largest number there is, so the test in RECOMP_CYCLES is a comparison
++// against a value that never changes and a branch that is never taken.
++extern "C" uint64_t recomp_cycles = 0;
++extern "C" uint64_t recomp_cycle_budget = UINT64_MAX;
++
++namespace {
++/// Instructions a second, or zero for as fast as the host can go.
++double cpu_rate = 0.0;
++/// How many instructions may go by between two looks at the clock. Small enough
++/// that a frame boundary lands where it should, large enough not to spend the
++/// whole time asking what the time is.
++uint64_t cpu_slice = 1;
++/// Where the console's clock was last agreed with the wall clock.
++std::chrono::high_resolution_clock::time_point cpu_epoch;
++uint64_t cpu_epoch_cycles = 0;
++} // namespace
++
++void ultramodern::set_cpu_instruction_rate(double per_second) {
++    cpu_rate = per_second;
++    if (per_second <= 0.0) {
++        recomp_cycle_budget = UINT64_MAX;
++        return;
++    }
++    // Half a millisecond of the console's time between looks.
++    cpu_slice = uint64_t(per_second / 2000.0);
++    if (cpu_slice < 1) {
++        cpu_slice = 1;
++    }
++    cpu_epoch = std::chrono::high_resolution_clock::now();
++    cpu_epoch_cycles = recomp_cycles;
++    recomp_cycle_budget = recomp_cycles + cpu_slice;
++}
++
++double ultramodern::get_cpu_instruction_rate() {
++    return cpu_rate;
++}
++
++extern "C" void recomp_cycle_spend(void) {
++    if (cpu_rate <= 0.0) {
++        recomp_cycle_budget = UINT64_MAX;
++        return;
++    }
++    const auto now = std::chrono::high_resolution_clock::now();
++    const double owed = double(recomp_cycles - cpu_epoch_cycles) / cpu_rate;
++    const auto due = cpu_epoch + std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(
++                                    std::chrono::duration<double>(owed));
++    if (due > now) {
++        // The console would still be working. Nothing else in the game can run
++        // while it is -- there is one processor -- so holding this thread here
++        // is what the console does, and the runtime's own threads carry on
++        // regardless because they are the parts that are not the processor.
++        ultramodern::sleep_until(due);
++    } else {
++        // The game has been waiting on something rather than working, and the
++        // wall clock has run ahead. That time is spent, not saved: a game that
++        // idles for a second does not get to run a second's worth of code at
++        // once afterwards.
++        cpu_epoch = now;
++        cpu_epoch_cycles = recomp_cycles;
++    }
++    recomp_cycle_budget = recomp_cycles + cpu_slice;
++}
++
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+     debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
+     thread_queue_insert(PASS_RDRAM running_queue, t_);

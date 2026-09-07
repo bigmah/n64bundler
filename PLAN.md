@@ -1449,6 +1449,251 @@ device. Banjo-Tooie's record names both halves of the video pair; the rest are
 left unnamed and recompiled, which is the safe answer, and now they are written
 down rather than silently decided.
 
+## The clock nobody was holding
+
+Everything above compares what two consoles draw. None of it compares *when*,
+and when turned out to be its own class of bug -- one a frame-numbered
+comparison is structurally unable to see. Two pictures numbered 1300 are the
+same moment of the game however many seconds each console took to reach it, so
+a runtime can draw every frame correctly, in the right order, and still play
+the game at the wrong speed. That is what this one was doing.
+
+**The complaint was that Banjo-Tooie's attract mode runs too fast.** The
+instrument for it did not exist, so `refrate` is it: the reference console run
+flat out, reporting once a second how many frames the game drew and how many
+times it read the pad. The second number is what makes the first mean anything
+-- Banjo-Tooie polls the controller once per vertical interrupt, so sixty a
+second is a console running at console speed, and half the frames in half the
+seconds is the same frame rate as all of them in all of them.
+
+What the two consoles do with the same cartridge and no input at all:
+
+| | frames | retraces | seconds | frames a second |
+|---|---|---|---|---|
+| reference console | 2058 | 4920 | 82 | 25.1 |
+| this runtime, before | 2031 | 4140 | 69 | 29.4 |
+
+Same attract mode, same two thousand frames, thirteen seconds shorter. And the
+shape of it was wrong in a way the average hides: the console's frame rate moves
+between twenty and thirty-one and stops dead three times for two or three
+seconds each, and this runtime sat on exactly thirty, every frame, for the whole
+of it, and never stopped at all.
+
+**A frame rate that never varies is not a good frame rate. It is a runtime that
+is not being asked for anything.** Banjo-Tooie asks the video interface for a
+frame every two retraces and then does a frame's work; on the console the work
+is regularly the longer of the two, so the game misses the retrace it aimed at
+and the picture stands for one more sixtieth of a second. Recompiled, the work
+takes almost nothing, the game never misses, and a game that never misses runs
+its own clock faster than the console ever ran it.
+
+Three things had to be ruled out before that could be believed.
+
+**That the game scales by the time it measures, which would make a frame rate
+harmless.** The engine does. The frame loop at `func_800151BC` counts the
+retraces that went by, hands the count to `func_800D8FA0`, which clamps it
+between one and fifteen and multiplies it by a constant to get seconds; read out
+of this runtime's memory during the attract mode, divisor 2, delta 2, step
+0.033333 seconds. Thirty frames at two retraces each is sixty retraces of motion
+a second, and the console's twenty-six at two-point-four each is also sixty, so
+on that reasoning both consoles move at the same speed and the frame rate does
+not matter.
+
+**The attract mode does not obey it.** The proof is that the same frame is the
+same picture at either speed: the frames this runtime writes out at 1100, 1400,
+1700, 2000 and 2600 are byte-for-byte identical between a run pinned at thirty
+frames a second and one running at twenty-two to thirty, even though the delta
+the engine is handed is two in the first and two or three in the second. A
+recorded demo has to replay the same way every time or it is not a recording, so
+it advances a fixed step per frame and ignores the clock. **Its state is a pure
+function of the frame number**, which makes its speed in the world exactly the
+frame rate -- and thirty against twenty-six is Banjo moving nineteen per cent
+too fast. That is the whole of the complaint, and it is why holding the frame
+rate down is not a workaround for it but the fix.
+
+**That the loading pauses are the cartridge.** They are not. `N64B_PI_LOG`
+reports every transfer the parallel interface is asked for, and the bursts that
+line up with the console's pauses are 0.6 to 0.9 MB -- a sixth of a second at
+the 5.4 MB/s a cartridge manages, against pauses of two to three seconds. Ten
+megabytes over the whole two and a half minutes. Modelling the cartridge's own
+transfer time would have been a day's work for five per cent of the gap, and
+measuring first is what stopped it being spent.
+
+**That the reference console's twenty-six frames a second is the console's and
+not mupen64plus's.** `REFRATE_R4300` runs the same measurement on a different
+execution engine. The cached interpreter and the dynamic recompiler -- two
+completely different pieces of machinery, one far faster on the host -- produce
+the same timeline frame for frame across two and a half minutes: title ends at
+frame 1020 at fifty-five seconds on both, pause at fifty-six and fifty-seven on
+both, frame 1812 at eighty-five seconds on both. The pad kept reading sixty
+times a second throughout, including through the pauses, so nothing was falling
+behind. **Twenty-six frames a second is what the machine does.**
+
+So the difference is one thing and it is the obvious one: the console's
+processor takes real time over the game's own code and this runtime takes
+almost none.
+
+### Charging for the processor
+
+The recompiler now counts what it recompiled. `RECOMP_CYCLES(n)` is emitted at
+the head of every basic block with that block's instruction count -- a block
+being the unit where counting once is exact, since every instruction in one runs
+or none of them does. A block starts at the function's first instruction, at any
+address something branches to, and after the delay slot of any branch or jump,
+that last one because the instruction after a delay slot is reached whether the
+branch was taken or not.
+
+The runtime holds the count to a rate, beside the scheduler in `scheduling.cpp`
+where the other thing that takes the processor away already lives. When the
+console's clock is ahead of the wall clock the thread sleeps until the wall
+clock catches up; when it is behind -- because the game has been waiting on
+something rather than working -- the credit is dropped rather than banked, so a
+game that idles for a second does not get to run a second's worth of code at
+once afterwards. Holding the *thread* is right rather than merely convenient:
+the console has one processor, and while it is busy nothing else in the game
+runs either.
+
+The cost when no rate is set is a comparison against a value that never changes
+and a branch that is never taken, because the budget starts at the largest
+number there is.
+
+**The rate is 23.4 million instructions a second**, and it is a measurement
+rather than a specification -- what an R4300 retires in a second is a fact about
+a processor waiting on memory, not a number in a manual. It was found by running
+the game against the reference console and adjusting until they agreed. Then it
+turned out to be a number that already existed: mupen64plus advances the COP0
+count register twice per instruction and that register ticks at half of the
+R4300's 93.75 MHz, which is 23.4 million. Arriving at the emulator's own timing
+model from the other end, without looking it up, is the strongest evidence
+either of them is right.
+
+What it does to the two and a half minutes that were measured:
+
+| | reference console | before | after |
+|---|---|---|---|
+| first frame drawn | 4s | 1s | 4s |
+| title screen | 20fps, 51s | 20fps, 51s | 20fps, 51s |
+| attract mode begins | frame 1020, 55s | frame 1019, 52s | frame 1021, 56s |
+| first loading pause | 56-57s | none | 57-58s |
+| second | 86-87s | none | 88s |
+| third | 107-108s | none | 108-109s |
+| attract mode ends | frame 3078, 137s | frame ~3050, 121s | frame 3079, 139s |
+| back to the title | 141s | 122s | 142s |
+| attract mode took | **82s** | **69s** | **83s** |
+
+Every landmark within two seconds of the console's across a hundred and forty
+seconds, and the frame rate moves between twenty-two and thirty the way the
+console's does instead of sitting on thirty. The loading pauses are there
+because the game is decompressing a world on a processor that now takes as long
+over it as the console's did -- which was never a cartridge-speed problem and
+was always this one.
+
+It is on by default, because a runtime that is compared against a console frame
+by frame should also run at its speed, and `N64B_CPU_RATE=0` lifts it for anyone
+who would rather have the game as fast as the machine can carry it. A module
+built before this change carries no counts and is not held to anything.
+
+**A second console, because the first one is not accurate.** Everything above is
+measured against mupen64plus, whose RSP and video plugins are high-level: the
+display processor finishes instantly there exactly as it does here, so it is the
+*least* likely emulator to show a game slowed by the hardware, and calibrating
+against it could as easily have reproduced its error as the console's. So the
+same attract mode was measured on ares, which emulates for accuracy rather than
+speed, by sampling its window once a second and finding the loading pauses that
+bracket the demo -- there is no frontend API to ask, and there does not need to
+be, because what is wanted is a duration and a black screen is legible.
+
+    mupen64plus  82s        ares  83.1s        this runtime  83s
+                                               (before: 69s)
+
+Three consoles inside one and a half per cent, and the one that was thirteen
+seconds out is the one that was fixed. That ares agrees is what makes 23.4
+million instructions a second a measurement of a processor rather than a
+constant fitted to one emulator's shortcut.
+
+**What this does not model.** Everything the runtime implements natively costs
+nothing: libultra, the audio microcode, the renderer. On the console those are
+real cycles, so the count is an undercount and the rate absorbs the difference,
+which is part of why it is a measured number rather than a derived one. The
+display processor is not modelled either -- a frame that a console could not
+rasterise in two retraces is still free here. Neither shows up in Banjo-Tooie,
+whose frame time is dominated by its own code, and both are where the next game
+that paces itself differently will disagree.
+
+### And the picture, which was already right
+
+The other half of the complaint was visual defects, so the same seven frames of
+the attract mode were compared against the reference console, cropped to the
+game's own rectangle. With the pacing fixed they are the same frames of the same
+game, and the mean absolute difference over every pixel is between 2.7 and 6.7
+out of 255 -- the same scene, the same camera, the same characters, the same
+text in the same place.
+
+Two things in that comparison looked like defects and were the comparison
+itself.
+
+**A fire that was not missing.** At frame 1400 the console draws a burning crate
+filling the left of the screen and this runtime drew nothing there, which is
+what a renderer dropping an alpha effect looks like. It is not: `screencapture`
+is a process and a round trip through the window server, so a photograph of the
+window lands two or three frames after the display list that asked for it, and
+the attract mode's camera swings off that fire in three frames. The console's
+own frames 1400, 1403 and 1406 show the fire full, a sliver, and gone; this
+runtime's picture of 1400 is the sliver. The renderer had drawn it.
+
+**A gamma that was not being applied.** Measured off the screenshots, this
+runtime came out twice as bright as the console at every frame, with the
+shadows lifted and an implied exponent between 1.6 and 2.0 -- exactly what
+applying a gamma the game had turned off would do, and `VI_STATUS` says it is
+turned off. Also not real: `screencapture` embeds the display's colour profile
+and leaves the pixels in the display's space, and the video plugin's PNG has no
+profile and is sRGB by convention. Converted through its own profile first, this
+runtime's mean brightness matches the console's to within half a per cent at
+every frame.
+
+What is left is sharpness, and it goes the other way: this runtime is softer
+because RT64 models the N64's three-point texture filter and the video
+interface's dither and anti-alias filters, and glide64mk2 renders at a higher
+internal resolution with bilinear filtering and skips them. The console's own
+output is the soft one.
+
+So there is no defect in these seven frames to fix, and saying that is worth as
+much as a fix would have been -- two of the three things that looked like one
+were instruments, and the third is the emulator being less faithful than this.
+
+### And the patches did not apply
+
+Changes to the vendored runtimes live as numbered patches under
+`N64Bundler/patches/`, applied by `build.sh`, because there is no fork. Adding
+to that series turned up that it had stopped being one: patch 0011 added
+`#include <array>` and a `JalResolutionResult::NoMatch` case that 0001 and 0008
+already carried, having been regenerated from a tree that had them. Applied to a
+fresh clone in order, 0001 lands and 0011 then fails -- so **a clone of this
+repository could not be built**, and the reason nobody saw it is that
+`build.sh` asks each patch whether it *reverse*-applies first, and on a checkout
+that already had everything, 0011 answered yes and was skipped. It is trimmed to
+the one hunk that is only its own now.
+
+Two other things were wrong with the same machinery. A change to `mesgqueue.cpp`
+-- two lines 0009 adds and the working tree does not have -- was live in the
+tree with no patch behind it, so a fresh clone would have been built from
+different source than everything in this file was measured on; it is 0013 now.
+And the reverse-applies test is not a question a patch can answer, because two
+patches are allowed to touch the same few lines and the second one moves the
+first one's context: with the processor work added next to the preemption work
+it was written beside, three patches stopped reverse-applying despite being
+applied, and `build.sh` would have stopped on a checkout that was perfectly
+correct.
+
+So it asks about the series instead, which is what it wanted to know: build what
+the patches say the files should be, out of the pinned commit and a scratch
+directory, and compare against what is there. That is exact, it costs copying a
+dozen small files, and it makes the patches the source of truth for what the
+vendored checkouts hold rather than a description of it that drifts. Both
+directions are tested -- a pristine checkout comes out byte-identical to the
+tree everything here was measured on, and that tree is recognised and left
+alone.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is
@@ -1495,15 +1740,17 @@ What is actually next:
    that references the earlier symbol. That needs `harvest` to record the
    symbol behind each masked field, and a database rebuilt from a `libultra*.a`,
    which is not a thing this machine has.
-4. **A reference console that does not have to be stepped.** `refshot` reaches
-   a frame by pausing the core and advancing one frame at a time, which is a
-   round trip through the frontend per frame: five to eight a second, so twenty
-   minutes to reach a moment the game gets to in six. That is the whole reason
-   the comparison above stops seven minutes into the game rather than an hour
-   in. mupen64plus has `M64CMD_SET_FRAME_CALLBACK`, which the same `new_frame()`
-   calls without pausing anything -- so the core could run flat out, count its
-   own frames, and pause only on the ones asked for. Ten times faster is the
-   difference between checking six frames of a game and checking sixty.
+4. **Charging for the parts of the console the runtime does the work of.** The
+   processor is held to an R4300's rate now, and nothing else is. Everything
+   the runtime implements natively is free -- libultra, the audio microcode,
+   the renderer -- so the instruction count is an undercount and the rate
+   absorbs it, which is why the rate is measured rather than derived. The
+   display processor is free too: a frame a console could not rasterise in two
+   retraces costs nothing here. Neither shows in Banjo-Tooie, whose frame time
+   is its own code, and both are where a game that draws more and thinks less
+   will disagree. The honest form of the first is to charge libultra's
+   implementations what their MIPS would have cost; the second needs a
+   fill-rate model and a renderer willing to say what it covered.
 5. **Playing Banjo-Tooie further than its opening.** It boots, plays its
    intro, reaches the file select, starts a game and plays the scene in
    Banjo's house, and runs its attract mode round six worlds without

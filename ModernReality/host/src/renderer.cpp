@@ -32,8 +32,13 @@
 
 #include <librecomp/game.hpp>
 
-extern "C" PTR(void) osViGetCurrentFramebuffer();
 #include <librecomp/rsp.hpp>
+
+extern "C" PTR(void) osViGetCurrentFramebuffer();
+
+/// The instructions the recompiled code has stood for, counted a basic block
+/// at a time. Defined in ultramodern beside the scheduler; see RECOMP_CYCLES.
+extern "C" uint64_t recomp_cycles;
 
 #include "hle/rt64_application.h"
 
@@ -468,15 +473,23 @@ public:
                 // game that submitted twenty lists or a thread that had no room
                 // for more. These two numbers say which.
                 using ms = std::chrono::duration<double, std::milli>;
+                // And how much of the console's processor the game asked for.
+                // A game that paces itself against its own work is a game whose
+                // frame rate is this number divided by what an R4300 could
+                // retire in a second, so it is the number to hold a runtime to.
+                const unsigned long long instructions = recomp_cycles - last_cycles_;
                 std::fprintf(stderr,
                              "vi: origin 0x%08X width %u, game framebuffer 0x%08X, "
                              "%llu display lists so far (%llu this second), "
-                             "%.1f ms in display lists, %.1f ms presenting\n",
+                             "%.1f ms in display lists, %.1f ms presenting, "
+                             "%.1fM instructions this second\n",
                              vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
                              uint32_t(osViGetCurrentFramebuffer()),
                              (unsigned long long)frames_,
                              (unsigned long long)(frames_ - last_frames_),
-                             ms(dl_time_).count(), ms(present_time_).count());
+                             ms(dl_time_).count(), ms(present_time_).count(),
+                             double(instructions) / 1e6);
+                last_cycles_ = recomp_cycles;
                 last_frames_ = frames_;
                 dl_time_ = {};
                 present_time_ = {};
@@ -560,6 +573,7 @@ private:
     std::chrono::steady_clock::duration dl_time_{};
     std::chrono::steady_clock::duration present_time_{};
     uint64_t last_frames_ = 0;
+    uint64_t last_cycles_ = 0;
     uint32_t last_display_list_ = 0;
     bool developer_ = false;
     /// Display lists submitted, which is the game's own frame count.

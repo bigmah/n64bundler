@@ -1,0 +1,124 @@
+n64recomp: count the instructions a basic block stands for
+
+A game that paces itself against how long its own work took runs faster here
+than it ever did on a console, because recompiled code is not the R4300. Banjo-
+Tooie asks the video interface for a frame every two retraces, misses that
+target about a third of the time on a console because a frame of its own code
+does not fit in two, and never missed it here: a flat thirty frames a second
+against a console's twenty-six, an attract mode that finished thirteen seconds
+early, and none of its three loading pauses.
+
+Giving those back means knowing how much processor went past, so the recompiler
+now says. RECOMP_CYCLES(n) is emitted at the head of every basic block with that
+block's instruction count -- a block being exactly the unit where counting once
+is right, since every instruction in one runs or none of them does. A block
+starts at the function's first instruction, at any address something branches
+to, and after the delay slot of any branch or jump; that last one because the
+instruction after a delay slot is reached whether the branch was taken or not,
+which makes it the head of a line of its own.
+
+The runtime decides what to do with the number, and by default nothing: the
+budget it is compared against starts at the largest number there is, so the cost
+is a comparison against a value that never changes and a branch never taken.
+
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -461,6 +461,32 @@
+ extern volatile unsigned recomp_preempt_wanted;
+ void recomp_preempt(uint8_t *rdram, unsigned status_reg);
+ #define YIELD_POINT() if (recomp_preempt_wanted) { recomp_preempt(rdram, ctx->status_reg); }
++
++// How much of the console's processor this code has used up.
++//
++// A game paces itself against the video interface: it does a frame's work and
++// then waits for however many retraces it asked for. Whether it gets them is a
++// question about how long the work took, and on the console the work takes
++// long enough that a game often misses the retrace it was aiming at and shows
++// the same picture for one more sixtieth of a second. Recompiled, the same
++// work takes almost none, so the game never misses -- and a game that never
++// misses runs its own clock faster than the console ever ran it, which is a
++// demo that plays out too quickly and a loading pause that is not there.
++//
++// So the runtime keeps a count of the instructions this code stands for, and
++// can hold it to the rate a 93.75 MHz R4300 would have managed. The count is
++// added once per basic block rather than once per instruction, because a block
++// is a straight line: whoever enters it runs all of it.
++//
++// `recomp_cycle_budget` is the count at which the runtime wants to be called.
++// It is the largest number there is when nothing is holding the game back, so
++// the test costs a comparison against a register and a branch that is never
++// taken.
++extern uint64_t recomp_cycles;
++extern uint64_t recomp_cycle_budget;
++void recomp_cycle_spend(void);
++#define RECOMP_CYCLES(n) \
++    do { recomp_cycles += (n); if (recomp_cycles >= recomp_cycle_budget) { recomp_cycle_spend(); } } while (0)
+ 
+ // The function signature for all recompiler output functions.
+ typedef void (recomp_func_t)(uint8_t* rdram, recomp_context* ctx);
+--- a/src/recompilation.cpp
++++ b/src/recompilation.cpp
+@@ -985,6 +985,9 @@
+             func.name);
+     }
+ 
++    // Somewhere the runtime can take the thread away. See YIELD_POINT.
++    fmt::print(output_file, "    YIELD_POINT()\n");
++
+     // Skip analysis and recompilation of this function is stubbed.
+     if (!func.stubbed) {
+         // Use a set to sort and deduplicate labels
+@@ -1025,7 +1028,40 @@
+             jtbl_lw_instructions.insert(jtbl.lw_vram);
+             for (uint32_t jtbl_entry : jtbl.entries) {
+                 branch_labels.insert(jtbl_entry);
++            }
++        }
++
++        // How much of the console's processor each straight line of code stands
++        // for. See RECOMP_CYCLES in recomp.h: the runtime can hold the game to
++        // the rate an R4300 managed, and to do that it has to be told how much
++        // work went past. Counting once per basic block rather than once per
++        // instruction is exact for the same reason a basic block is one: every
++        // instruction in it runs, or none of them does.
++        //
++        // A block begins at the function's first instruction, at any address
++        // something branches to, and after the delay slot of any branch or
++        // jump -- the last of those because the instruction after a delay slot
++        // is reached whether the branch was taken or not, which makes it the
++        // start of a line of its own.
++        std::vector<uint32_t> block_lengths(instructions.size(), 0);
++        {
++            std::vector<size_t> starts;
++            starts.push_back(0);
++            for (size_t i = 0; i < instructions.size(); i++) {
++                const uint32_t at = func.vram + uint32_t(i * 4);
++                if (i != 0 && branch_labels.count(at) != 0) {
++                    starts.push_back(i);
++                }
++                if ((instructions[i].isBranch() || instructions[i].isJump()) && i + 2 < instructions.size()) {
++                    starts.push_back(i + 2);
++                }
+             }
++            std::sort(starts.begin(), starts.end());
++            starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
++            for (size_t s = 0; s < starts.size(); s++) {
++                const size_t end = (s + 1 < starts.size()) ? starts[s + 1] : instructions.size();
++                block_lengths[starts[s]] = uint32_t(end - starts[s]);
++            }
+         }
+ 
+         // Second pass, emit code for each instruction and emit labels
+@@ -1050,6 +1086,12 @@
+                 ++cur_label;
+             }
+ 
++            // The processor time this straight line of code stands for, charged
++            // on the way in.
++            if (block_lengths[instr_index] != 0) {
++                fmt::print(output_file, "    RECOMP_CYCLES({});\n", block_lengths[instr_index]);
++            }
++
+             // Advance the reloc index until we reach the last one or until we get to/pass the current instruction
+             while ((reloc_index + 1) < section.relocs.size() && section.relocs[reloc_index].address < vram) {
+                 reloc_index++;

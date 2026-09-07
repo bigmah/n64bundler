@@ -113,6 +113,17 @@ bool capture_window(const char *path) {
     std::snprintf(command, sizeof(command), "/usr/sbin/screencapture -x -o -t png -l%u '%s'",
                   unsigned(id), named.c_str());
     if (std::system(command) != 0) {
+        // Almost always one thing: the window server stops backing a window
+        // that is completely covered by another, and then there is no image to
+        // copy. Worth saying out loud, because the caller's fallback is the
+        // frame out of the console's memory -- which is a picture with parts of
+        // the scene missing from it, and looks like a renderer bug rather than
+        // a screenshot that could not be taken.
+        std::fprintf(stderr,
+                     "note: the window server would not photograph window %u, which usually "
+                     "means it is behind another window. Falling back to the frame in memory, "
+                     "which may be missing part of the scene.\n",
+                     unsigned(id));
         return false;
     }
     std::fprintf(stderr, "note: wrote %s, a picture of the window.\n", named.c_str());

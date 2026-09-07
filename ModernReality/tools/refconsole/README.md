@@ -66,6 +66,53 @@ script the things a debugger gives a person:
   the frame rate is, because libultra keeps two `OSViContext`s and swaps them
   each time.
 
+- `refrate <rom> [seconds]` says how fast the game actually runs, one line a
+  second, with the core at console speed. Two numbers: **frames** the game drew,
+  which is the clock everything else here is counted in, and **pad reads**,
+  which Banjo-Tooie makes once per vertical interrupt and which should sit near
+  sixty whatever the game is doing. The second one is not decoration -- a frame
+  rate means nothing without it, because half the frames in half the seconds is
+  the same number, and it is how you tell a console running at console speed
+  from a frontend that could not keep up.
+
+  This is the question a frame-numbered comparison cannot ask. `refshot` says
+  what the console draws at frame 1300; it cannot say that the console took
+  eighty-two seconds to play an attract mode this runtime played in
+  sixty-nine, because two pictures numbered 1300 are the same moment of the
+  game however long each console took to get there. A runtime can draw every
+  frame correctly and draw them too often, and that is a game played at the
+  wrong speed with nothing wrong in any picture of it.
+
+  `REFRATE_R4300` picks the core's execution engine -- 0 pure interpreter, 1
+  cached (the default), 2 the dynamic recompiler. The emulated machine's timing
+  is not supposed to depend on which, so running two and getting one answer is
+  how a frame rate that belongs to the console is told from one that belongs to
+  a host that could not keep up. On Banjo-Tooie the cached interpreter and the
+  recompiler agree frame for frame across two and a half minutes, which is what
+  made its twenty-six frames a second a fact about the console.
+
+Two things will make a correct picture look wrong when it is compared against
+one of these, and both cost an afternoon if they are not known first.
+
+**A window photograph is a few frames behind the frame that asked for it.**
+`n64b-run` takes its picture through `screencapture`, which is a process and a
+round trip through the window server, so the frame numbered 1400 is really 1402
+or 1403. Through a slow pan that does not matter. Through a fast one it does:
+Banjo-Tooie's attract mode swings the camera off a burning crate in three
+frames, so the runtime's picture of frame 1400 had no fire in it and the
+console's had a large one, which reads exactly like a renderer dropping an
+effect and is a screenshot taken slightly late. Compare a sequence -- 1400,
+1403, 1406 -- before believing anything is missing.
+
+**A screenshot off a Mac's screen is in the display's colour space, not sRGB.**
+`screencapture` embeds the monitor's profile and leaves the pixels in it; the
+video plugin's PNG has no profile at all and is sRGB by convention. Compared
+without converting, this runtime's frames come out twice as bright as the
+console's, in a way that looks precisely like a gamma the game turned off being
+applied anyway -- an exponent near 2.0, lifted shadows, the lot. Converted
+through the embedded profile, the same frames match the console's mean
+brightness to within half a per cent. Convert first, then compare.
+
 - `censusdiff.py <census> <trace-all.log> <symbols.toml>` says which functions
   the console entered and this runtime never did, and the reverse. The second
   file is what `n64b-run` prints with a `--trace` module and `N64B_TRACE_ALL`.
@@ -77,6 +124,13 @@ script the things a debugger gives a person:
   one from each console, is how "the picture is wrong" becomes "they agree for
   five hundred and seven commands and then do not".
 
+`refrate` found that Banjo-Tooie runs its attract mode at twenty-six frames a
+second on the console and thirty here, and that its three loading pauses -- two
+to three seconds each -- did not exist here at all. Both are the same fact: the
+console's processor takes real time over the game's own code and a recompilation
+does not, so the game never misses the frame it aims at and never waits for
+anything. PLAN.md has what was done about it.
+
 Each of them found the thing it was built for. `refrun` and `refdbg`: Banjo-Tooie
 and this runtime load the same eighty-one overlays in the same order, and then
 the console loads twelve more, which walks back to eight instructions reading
@@ -87,7 +141,17 @@ commands before they part. PLAN.md has the rest.
 
 ## Building
 
-The core has to be one built with its debugger, which no package ships:
+`refrate` needs nothing but the packaged core, because it only ever asks the
+core to run and to say when it has drawn a frame:
+
+    brew install mupen64plus
+    clang -O2 -o refrate refrate.c \
+      -I/opt/homebrew/Cellar/mupen64plus/2.6.0/include \
+      -L/opt/homebrew/lib -lmupen64plus -Wl,-rpath,/opt/homebrew/lib
+    ./refrate game.z64 190
+
+The rest read the console's memory or break on its addresses, so their core has
+to be one built with its debugger, which no package ships:
 
     git clone --depth 1 https://github.com/mupen64plus/mupen64plus-core
     brew install mupen64plus binutils          # the RSP plugin, and libopcodes
@@ -97,7 +161,7 @@ The core has to be one built with its debugger, which no package ships:
       make all DEBUGGER=1 OSD=0 NEW_DYNAREC=0 -j 10 \
         STRINGS=/opt/homebrew/opt/binutils/bin/strings
 
-Then any of them, against that core:
+Then any of those, against that core:
 
     clang -O2 -o refdbg refdbg.c -I/opt/homebrew/include \
       -L<core-dir> -lmupen64plus -Wl,-rpath,<core-dir>
@@ -110,6 +174,30 @@ dylib next to the binary is the shortest way.
 `M64P_CORE` must name the same file the program is linked against, or the
 plugin talks to a second copy of the core that nobody started. `M64P_RSP` and
 `M64P_DATA` default to Homebrew's.
+
+## The second console, and why there is one
+
+mupen64plus is the console these tools drive, and it is not an accurate one.
+Its RSP and video plugins are high-level: a display list is executed by the host
+and the display processor reports itself finished immediately, which is exactly
+what this runtime does. So on any question about *timing*, mupen64plus and this
+runtime share a shortcut, and a runtime calibrated against it could be
+reproducing the shortcut rather than the console.
+
+For those questions there is [ares](https://ares-emu.net/), which emulates for
+accuracy rather than for speed (`brew install --cask ares-emulator`). It has no
+frontend API to ask about frames, and does not need one, because what a timing
+question wants is a duration: run it windowed, photograph the window once a
+second with `screencapture -R` at the bounds System Events reports, and read the
+loading pauses off the sequence -- a game that stops drawing for two seconds is
+a run of frames that do not differ, and a black screen is legible without any
+help from the emulator. Keep the window raised for every shot; `-R` captures a
+region of the screen and not a window, so anything that comes forward is
+photographed instead, silently.
+
+Measured that way, Banjo-Tooie's attract mode takes 83.1 seconds on ares and 82
+on mupen64plus, and that agreement is what made the R4300 rate in PLAN.md a
+measurement rather than a number fitted to one emulator.
 
 ## What it is not
 

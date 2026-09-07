@@ -80,28 +80,71 @@ done
 step "Applying the patches to the vendored runtimes"
 RECOMP_SRC="$MR_SRC/vendor/N64ModernRuntime/N64Recomp"
 RUNTIME_SRC="$MR_SRC/vendor/N64ModernRuntime"
-for patch in "$HERE"/patches/*.patch; do
-  [ -f "$patch" ] || continue
-  name="$(basename "$patch")"
-  # A patch names the checkout it belongs to, because there are two of them and
-  # N64Recomp is a submodule of the other: 0001-n64recomp-... applies inside
-  # N64Recomp, 0002-librecomp-... in the runtime around it.
-  case "$name" in
-    *-n64recomp-*)               target="$RECOMP_SRC" ;;
-    *-librecomp-*|*-ultramodern-*) target="$RUNTIME_SRC" ;;
-    *)
-      echo "$name does not say which checkout it applies to" >&2
-      exit 1 ;;
+
+# A patch names the checkout it belongs to, because there are two of them and
+# N64Recomp is a submodule of the other: 0001-n64recomp-... applies inside
+# N64Recomp, 0002-librecomp-... in the runtime around it.
+patches_for() {
+  for patch in "$HERE"/patches/*.patch; do
+    [ -f "$patch" ] || continue
+    case "$(basename "$patch")" in
+      *-n64recomp-*)                 [ "$1" = recomp ]  && printf '%s\n' "$patch" ;;
+      *-librecomp-*|*-ultramodern-*) [ "$1" = runtime ] && printf '%s\n' "$patch" ;;
+      *) echo "$(basename "$patch") does not say which checkout it applies to" >&2; exit 1 ;;
+    esac
+  done
+}
+
+# Whether a checkout already carries its patches.
+#
+# Asking each patch whether it reverse-applies is the obvious way and it is
+# wrong, because two patches are allowed to touch the same few lines: once one
+# of them has landed the other's context has moved and it will not reverse even
+# though it is applied. What is being asked is a question about the series and
+# not about any patch in it, so it is answered that way -- build what the
+# series says the files should be, out of the pinned commit and a scratch
+# directory, and compare. That is exact, it costs a handful of small files, and
+# it means the patches are the source of truth for what these checkouts hold.
+series_matches() {
+  local target="$1" which="$2" scratch files rc=0
+  files=$(patches_for "$which" | xargs awk '/^--- a\//{print substr($2, 3)}' | sort -u)
+  [ -n "$files" ] || return 0
+  scratch="$(mktemp -d)"
+  for f in $files; do
+    mkdir -p "$scratch/$(dirname "$f")"
+    git -C "$target" show "HEAD:$f" > "$scratch/$f" 2>/dev/null || { rm -rf "$scratch"; return 1; }
+  done
+  for patch in $(patches_for "$which"); do
+    git -C "$scratch" apply -p1 "$patch" 2>/dev/null || { rm -rf "$scratch"; return 1; }
+  done
+  for f in $files; do
+    cmp -s "$scratch/$f" "$target/$f" || rc=1
+  done
+  rm -rf "$scratch"
+  return $rc
+}
+
+for which in recomp runtime; do
+  case "$which" in
+    recomp)  target="$RECOMP_SRC" ;;
+    runtime) target="$RUNTIME_SRC" ;;
   esac
-  if git -C "$target" apply --reverse --check "$patch" >/dev/null 2>&1; then
-    echo "    $name is already applied"
-  elif git -C "$target" apply --check "$patch" >/dev/null 2>&1; then
-    git -C "$target" apply "$patch"
-    echo "    applied $name"
-  else
-    echo "$name applies neither way; the submodule pin has moved under it" >&2
-    exit 1
+  if series_matches "$target" "$which"; then
+    echo "    $(basename "$target") already carries its patches"
+    continue
   fi
+  for patch in $(patches_for "$which"); do
+    name="$(basename "$patch")"
+    if git -C "$target" apply "$patch" 2>/dev/null; then
+      echo "    applied $name"
+    else
+      echo "$name does not apply to $(basename "$target"), and the series as a whole" >&2
+      echo "does not match what is there either. Either the submodule pin has moved" >&2
+      echo "under the patches, or the checkout has been edited by hand -- and if it" >&2
+      echo "has, the edit belongs in a patch. git -C $target diff will show it." >&2
+      exit 1
+    fi
+  done
 done
 
 step "Configuring ModernReality"

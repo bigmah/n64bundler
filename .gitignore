@@ -6,6 +6,14 @@
 *.rom
 *.bin
 
+# And what a game writes back. A save is a cartridge's memory with the player's
+# progress in it, which is the player's and not this repository's; running a
+# game from the checkout leaves one beside the ROM.
+*.eeprom
+*.sra
+*.fla
+*.mpk
+
 # macOS
 .DS_Store
 

@@ -1,0 +1,32 @@
+ultramodern: do not write a blocked thread's state twice
+
+0009 set OSThreadState::BLOCKED in do_send and do_recv, just after putting the
+thread on the message queue's own wait list. The working tree has not had those
+two lines for some time and nothing wrote down why, so this records the tree as
+it has actually been running: every measurement in PLAN.md, including all of the
+comparisons against the reference console, was taken without them.
+
+What sets the state instead is the code that stops and starts threads, which is
+where the state is also read -- osStopThread leaves a thread's queue name on it
+and osStartThread puts it back on that queue and marks it blocked there. A patch
+series that does not reproduce the tree it was tested on is worse than one line
+of redundancy either way.
+
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -112,7 +112,6 @@
+         while (MQ_IS_FULL(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
+-            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
+     }
+@@ -151,7 +150,6 @@
+         while (MQ_IS_EMPTY(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
+-            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
+     }

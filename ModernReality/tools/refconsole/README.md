@@ -91,8 +91,29 @@ script the things a debugger gives a person:
   recompiler agree frame for frame across two and a half minutes, which is what
   made its twenty-six frames a second a fact about the console.
 
-Two things will make a correct picture look wrong when it is compared against
-one of these, and both cost an afternoon if they are not known first.
+Four things will make a correct picture look wrong when it is compared against
+one of these, and each cost an afternoon if it was not known first.
+
+**The frame in the console's memory runs behind the console.** `n64b-run`'s
+memory-fallback screenshot reads the frame RT64 last copied back into RDRAM,
+and that copy is not per-frame current: it can run several frames behind the
+game's state, and further behind the longer the run and the busier the host.
+Compared frame-number-to-frame-number against the reference, that reads as
+this runtime's game sliding steadily behind the console's -- a clock slipping
+somewhere -- when the game's own counters, read out of the same memory image,
+are equal the whole time. Super Mario 64 lost most of a session to it. When a
+picture and the state behind it disagree, believe the state; the game cannot
+see the stale copy (nothing in these cartridges reads its framebuffer back),
+only the photograph can.
+
+**A loaded host photographs late.** Running the reference console, a build, or
+an image conversion beside `n64b-run` delays its presentation by enough that a
+window photograph shows a picture several frames older than the game -- which
+reads exactly like the runtime lagging, and is really the measurement
+machinery competing with the thing it measures. Measured with the machine
+otherwise quiet, the window matches the reference's render of the same frame
+to a fraction of a percent from the first seconds. Measure alone, or measure
+state.
 
 **A window photograph is a few frames behind the frame that asked for it.**
 `n64b-run` takes its picture through `screencapture`, which is a process and a

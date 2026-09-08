@@ -1694,6 +1694,115 @@ directions are tested -- a pristine checkout comes out byte-identical to the
 tree everything here was measured on, and that tree is recognised and left
 alone.
 
+## Super Mario 64, measured against the reference console
+
+Banjo-Tooie got the side-by-side treatment because it was broken. Super Mario
+64 got it because it was working -- "plays well, but not perfectly" is a claim
+about a difference, and a difference is a thing these instruments exist to
+find. The campaign drove both consoles through the same twelve minutes of the
+game and measured everything the toolkit can measure. The verdict comes first,
+because it is the unusual kind: **no divergence was found in the game.** Every
+difference the comparison surfaced -- and it surfaced several, some of them
+alarming-looking -- was an artifact of the instruments, and each one cost real
+time before it confessed.
+
+What was actually established, with the game state read out of both consoles'
+memory at the same value of the game's own frame counter (`0x8032D5D4`, the
+word that increments once per drawn frame, found by asking which word does
+rather than by trusting a symbol map):
+
+- **The state is in lockstep.** At equal frame counts, the title fade, the
+  star wipe, the goddard head, and the audio sequencer's tick counters agree
+  to the exact value, twelve minutes in as at boot. Outside the z-buffer, the
+  framebuffers and the audio heap's own asynchronous scratch, the two
+  consoles' eight megabytes differ by a flat few thousand words -- the two
+  frames of skew the two dump instruments have -- and the count does not grow.
+- **It plays in lockstep.** One input script drives both consoles through
+  Start, the file select, Peach's letter, the Lakitu fly-in, a sign read on
+  the castle lawn, six hundred frames of walking and a jump. Mario's position
+  agrees to the decimal at every checkpoint -- (-485.9, 839.5, -181.7) on
+  both, five thousand frames in -- the same sign opens the same dialog on the
+  same frame, and a deliberately pathological input pattern that confuses the
+  Lakitu dialog into reopening confuses both consoles into the identical
+  reopened page.
+- **It is paced in lockstep.** Both consoles hold the title at thirty frames a
+  second, stall for the same two seconds at the same frame (1636, the demo
+  loading), and run the Bowser demo in the same twenty-two-to-twenty-nine
+  band. The attract demo's recorded inputs land on the same frames, so the
+  same fight plays out shot for shot.
+- **The sound is the same sound.** The sequencer counters prove the same notes
+  start on the same frames; the level meter shows music from the first second,
+  the same silences at the same transitions, and peaks in the healthy half of
+  full scale throughout.
+
+What the instruments claimed before they confessed, recorded so the next
+campaign does not pay for the same lessons:
+
+- **A phase lag that grew with time.** Frame-numbered screenshots showed this
+  runtime's intro sliding behind the console's -- six frames behind by frame
+  90, forty by frame 1350 -- which reads as a clock slipping somewhere. The
+  game's own counters, read out of the same dumps, were equal the whole time.
+  The pictures were stale, not the game: the memory-fallback screenshot reads
+  the frame RT64 last copied into RDRAM, and that copy runs behind the state
+  by an amount that grows when the host is busy. Nothing in this cartridge
+  reads its own framebuffer back, so the game cannot tell; only the
+  photograph can.
+- **A window that seemed to lag five frames at boot.** Real, but not the
+  runtime's: it was this machine rendering, compiling, and running a second
+  console at the same time. Measured alone, the window is current from the
+  first seconds -- a mid-wipe photograph matches the reference's render of
+  the same frame to a mean difference of 0.4 out of 255. Measure with the
+  machine quiet, or measure state instead of pictures.
+- **A z-buffer that never matches.** The reference's RDP writes its cleared
+  depth (0xFFFCFFFC, 320 by 224 of it) back to memory; RT64 keeps depth on
+  the GPU. 140KB of guaranteed diff in every dump, meaning nothing, excluded
+  from every comparison since.
+
+What a player could still tell apart, none of it a defect, all of it a choice:
+this host renders at the window's resolution with anti-aliasing where
+glide64mk2 renders at 640x480, and RT64 models the three-point texture filter
+where glide64mk2 substitutes bilinear. Per-game settings already carry the
+knobs -- `Original` resolution takes the render back to the console's own
+pixel grid for anyone who wants the reference's look rather than the
+reference's game.
+
+### The text that materialised wrong, and the frames nobody was drawing
+
+The comparison above ran on landmarks seconds apart, and it was blind to a thing
+that lives in a third of a second: the way a dialog box opens. Super Mario 64's
+sign boxes spin open -- `render_dialog_entries` rotates the box a full turn
+(`gDialogBoxAngle` runs 90 to 0 at ten degrees a frame, drawn at four times that)
+while it scales up -- and scroll between pages, sliding the old text up and out
+as the new text slides in. Both are nine-frame animations, and every frame of
+them was falling between the shots.
+
+Captured frame by frame, the open was clean and the scroll was not: on every
+other frame of a page turn the box filled with scattered, half-rotated letters --
+"castle via a warp pipe" flung across the box as loose glyphs -- and then the
+next frame was clean again. Clean, scrambled, clean, scrambled is not a game bug;
+it is a runtime drawing frames the game never submitted. RT64 was set to fill this
+machine's 120Hz panel by interpolating between the game's frames, which is right
+for the 3D world and wrong for text: a box whose glyphs reflow every frame has
+each glyph tweened from where it was to where it went, so the in-between frame
+scatters them. The reference console shows each of the game's frames once, so its
+scroll was smooth -- and the runtime beside it, interpolating, was the only one
+smearing.
+
+The fix is to match the reference rather than the panel: present at the game's own
+rate, no interpolated frames, which is what an emulator does and what the console
+did. `RefreshRate::Original` in `main.cpp`, not `Display`. With it, every frame of
+the spin-open and the page scroll is a frame the game drew, and the two consoles'
+dialog animates identically. The cost is the smooth-motion tween on the 3D world,
+which the reference never had either -- so losing it is one more way the runtime
+stops being distinguishable from the console it is measured against.
+
+This is the one thing in Super Mario 64 that was genuinely not right, and it was
+invisible to a frame-numbered comparison for the same reason it was visible to a
+player: it happens too fast to land on a checkpoint and too often to miss when the
+box opens in front of you. The lesson for the next title is that an animation
+shorter than the gap between shots needs its own capture -- every frame across the
+transition -- because the landmark comparison structurally cannot see it.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is

@@ -475,9 +475,24 @@ int main(int argc, char **argv) {
     // three.
     graphics.ar_option = ultramodern::renderer::AspectRatio::Original;
     graphics.msaa_option = ultramodern::renderer::Antialiasing::MSAA2X;
-    // The N64 ran at 60Hz whatever the display did; matching the display is
-    // what makes a 120Hz panel look right rather than judder.
-    graphics.rr_option = ultramodern::renderer::RefreshRate::Display;
+    // The game's own frame cadence, and deliberately not the display's.
+    //
+    // RefreshRate::Display fills a 120Hz panel by having RT64 interpolate
+    // between the game's frames, which is smooth for the 3D world and wrong for
+    // everything drawn in two dimensions: a dialog box that scrolls or reflows
+    // has its text tweened character by character, so on every in-between frame
+    // the letters land between their old and new positions and the box fills
+    // with scattered, half-rotated glyphs. Super Mario 64's text materialises
+    // through exactly that path -- the sign boxes spin open and scroll between
+    // pages -- so the interpolation turned every page turn into a smear.
+    //
+    // The reference the runtime is measured against does not interpolate: it
+    // shows each of the game's frames once, at the game's rate. Matching it is
+    // the whole goal, and it removes the artifact rather than papering over it,
+    // so the runtime presents at the game's own rate too. On a high-refresh
+    // panel that means each frame is held for several refreshes, which is what
+    // an emulator does and what the console did.
+    graphics.rr_option = ultramodern::renderer::RefreshRate::Original;
     graphics.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Auto;
     graphics.rr_manual_value = 60;
     graphics.ds_option = 1;

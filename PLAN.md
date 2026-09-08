@@ -1803,6 +1803,38 @@ box opens in front of you. The lesson for the next title is that an animation
 shorter than the gap between shots needs its own capture -- every frame across the
 transition -- because the landmark comparison structurally cannot see it.
 
+### The window that crashed when it closed
+
+Changing the frame pacing above turned a crash on every close that had been a
+crash on some closes. Closing the window called `ultramodern::quit()`, and a
+fraction of the time the process ended in a segfault instead of an exit -- always
+in the game's own recompiled code, a few instructions into a load, on a thread
+the shutdown never touched.
+
+A game keeps several OS threads of its own -- a sound thread, a retrace thread --
+and the cooperative scheduler runs exactly one at a time while the rest are parked
+on a semaphore. `quit()` sets the exit flag, the main loop breaks, and the runtime
+joins the main game thread and its own service threads and then frees rdram. It
+does not join the game's other threads, and it does not stop the one that was
+running: that thread keeps executing recompiled code until it next yields, which
+for a thread deep in an audio synthesis loop is not soon. When the free landed
+first, the thread read rdram the kernel had just taken back. Which thread was
+mid-run at the moment of quit is a matter of timing, so the crash came and went --
+and presenting at the game's rate rather than the panel's shifted that timing
+enough to make it show every time. That is the honest cost of the pacing change:
+it did not cause the bug, it revealed one that was already there.
+
+There is nothing after the join worth that race. `join_saving_thread` has already
+written the save to disk -- a write reaches the host-side buffer synchronously
+when the game makes it, and that join is where the buffer is flushed -- so the one
+piece of state a player cares about is durable before rdram is touched. Freeing
+rdram, closing the audio device and unwinding `main()` are housekeeping the
+operating system does for us, correctly and instantly, when the process ends. So
+the process ends -- `std::_Exit` after the saving join -- rather than unmapping
+memory a live thread is still reading. Patch 0017. Four close cycles that used to
+be a coin toss now exit cleanly every time, and a forty-second run proves the
+change is only in the shutdown and nowhere near the game.
+
 ## Roadmap
 
 Everything the plan set out is built. What is left is coverage, which is

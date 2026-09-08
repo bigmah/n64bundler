@@ -1,0 +1,70 @@
+librecomp: end the process rather than race a live thread on quit
+
+Closing the game's window called ultramodern::quit(), and a fraction of the time
+that ended in a segfault instead of an exit. The crash was always in the game's
+own recompiled code, a few instructions into a load, on a thread the shutdown
+never touched.
+
+A game keeps several OS threads of its own -- a sound thread, a retrace thread --
+and the cooperative scheduler runs exactly one of them at a time while the rest
+are parked on a semaphore. quit() sets the exit flag, the main loop breaks, and
+the runtime joins the main game thread and its own service threads and then frees
+rdram. It does not join the game's other threads, and it does not stop the one
+that was running: that thread keeps executing recompiled code until it next
+yields, which for a thread deep in an audio synthesis loop is not soon. When the
+free landed first, the thread read rdram the kernel had just taken back. Which
+thread was mid-run at quit is a matter of timing, so the crash came and went --
+and a change to the frame pacing that shifted that timing was enough to make it
+show every time.
+
+There is nothing after the join worth that race. join_saving_thread has already
+written the save to disk -- a write reaches the host-side buffer synchronously
+when the game makes it, and that join is where the buffer is flushed -- so the
+one piece of state a player cares about is durable before rdram is touched.
+Freeing rdram, closing the audio device and unwinding main() are all things the
+operating system does for us, correctly and instantly, when the process ends. So
+the process ends, with std::_Exit, rather than unmapping memory a live thread is
+still reading.
+
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -1136,18 +1136,25 @@
+     ultramodern::join_event_threads();
+     ultramodern::join_thread_cleaner_thread();
+     ultramodern::join_saving_thread();
+-    
+-    // Free rdram.
+-    bool free_failed;
+-#ifdef _WIN32
+-    // VirtualFree returns zero on failure.
+-    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+-#else
+-    // munmap returns -1 on failure.
+-    free_failed = (munmap(rdram, allocation_size) == -1);
+-#endif
+-
+-    if (free_failed) {
+-        printf("Failed to free rdram\n");
+-    }
++
++    // The game's own OS threads are not joined above -- only the main game
++    // thread and the runtime's service threads are. A game keeps several
++    // threads of its own (a sound thread, a retrace thread), and exactly one of
++    // them is running recompiled code at any instant while the rest are parked
++    // on a semaphore. `quit()` sets the exit flag but does not stop that running
++    // thread; it keeps executing until it next yields, which for a thread deep
++    // in a synthesis loop can be a while. Freeing rdram out from under it is a
++    // race with only one safe outcome and one segfault, and on window close the
++    // segfault is what a player got -- the running thread reading rdram a few
++    // instructions after `munmap` returned it to the kernel.
++    //
++    // There is nothing left to do that is worth that race. `join_saving_thread`
++    // above has already flushed the save to disk -- a write reaches the
++    // host-side buffer synchronously when the game makes it, and that join is
++    // where the buffer is written out -- so the only state a player cares about
++    // is durable before this point. Freeing rdram, closing the audio device and
++    // returning up through main() are all housekeeping the operating system does
++    // for us, correctly and instantly, the moment the process ends. So end it,
++    // rather than unmap memory a live thread is still reading.
++    std::_Exit(EXIT_SUCCESS);
+ }

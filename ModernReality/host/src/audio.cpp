@@ -110,6 +110,16 @@ size_t frames_remaining() {
 
 void set_frequency(uint32_t frequency) {
     std::lock_guard<std::mutex> lock(stream_mutex);
+    // A resampler with nothing behind it is a bucket with no drain. Headless
+    // opens no device (see gfx_init_callback) and so nothing ever calls
+    // audio_callback, but the game goes on handing over a buffer every frame
+    // regardless -- and queue_samples only asks whether there is a stream. So
+    // the stream is the thing not to build: without one every buffer is
+    // dropped, and with one SDL keeps all of them. A game driven two hundred
+    // times faster than a sound card plays fills memory at that rate.
+    if (device == 0) {
+        return;
+    }
     if (int(frequency) == game_frequency && stream != nullptr) {
         return;
     }

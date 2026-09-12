@@ -124,6 +124,32 @@ void poke_memory();
 /// the event pump.
 void init_input();
 
+// --- a game something else is playing ---------------------------------------
+//
+// `--gym` hands the console to another process: it holds the controller, it
+// says when a frame happens, and it reads the game's memory out of the same
+// pages the game is running on. See gym.cpp, and the protocol it speaks in
+// include/modernreality/gym.h.
+
+/// Attach to the shared block and the control socket. False with `error` set if
+/// either is not there, which is a game started as a gym by nobody.
+bool gym_open(const std::string &name, bool headless, std::string &error);
+bool gym_running();
+bool gym_headless();
+
+/// Map the console's memory into the shared block, before anything aliases it.
+void gym_map_memory(uint8_t *rdram);
+
+/// Start driving, once the game is registered. Returns immediately; the driving
+/// happens on a thread of its own.
+void gym_start();
+
+/// The controller the other process is holding, if there is one.
+bool gym_input(int controller, uint16_t *buttons, float *x, float *y);
+
+/// A renderer that counts the game's frames and draws none of them.
+ultramodern::renderer::callbacks_t headless_renderer_callbacks();
+
 } // namespace n64b
 
 #endif

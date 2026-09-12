@@ -42,19 +42,31 @@ struct Options {
     bool fullscreen = false;
     bool developer = false;
     std::string unpack;
+    std::string gym;
+    bool headless = false;
 };
 
 void usage() {
     std::fprintf(stderr,
                  "usage: n64b-run --module <game.dylib> --rom <game.z64>\n"
                  "                [--config-dir <dir>] [--fullscreen] [--developer]\n"
-                 "                [--unpack <image.bin>]\n"
+                 "                [--unpack <image.bin>] [--gym <name>] [--headless]\n"
                  "\n"
                  "  --unpack  run until the game jumps to code that was not recompiled,\n"
                  "            then write the console's memory to <image.bin> and stop.\n"
                  "            A cartridge whose game is compressed is unpacked by its own\n"
                  "            loader and by nothing else; this is how the unpacked code is\n"
-                 "            got at, so that the analyser can have a second look with it.\n");
+                 "            got at, so that the analyser can have a second look with it.\n"
+                 "\n"
+                 "  --gym     play the game for another process rather than for a person:\n"
+                 "            it holds the controller, it decides when each frame happens,\n"
+                 "            and it reads the console's memory out of the shared block of\n"
+                 "            this name. Nothing advances until it says so, and then as\n"
+                 "            fast as this machine manages. The control socket is expected\n"
+                 "            on file descriptor 3.\n"
+                 "  --headless  no window and no renderer: the game still builds its\n"
+                 "            display lists, and they are counted and dropped. Only useful\n"
+                 "            with --gym, and several times faster than drawing them.\n");
 }
 
 fs::path default_config_dir() {
@@ -199,6 +211,10 @@ void map_cartridge_window(uint8_t *rdram) {
 
 void place_sections(uint8_t *rdram, recomp_context *ctx) {
     (void)ctx;
+    // First, because both of the windows below are second views of these same
+    // pages and a view made before the pages are shared is a view of the pages
+    // that were replaced.
+    n64b::gym_map_memory(rdram);
     map_register_window(rdram);
     map_cartridge_window(rdram);
     n64b::set_watch_memory(rdram);
@@ -245,6 +261,13 @@ RspExitReason unhandled_microcode(uint8_t *rdram, uint32_t ucode_addr) {
 }
 
 RspUcodeFunc *select_microcode(const OSTask *task) {
+    // Nobody is listening. The audio microcode is the one the runtime cannot do
+    // itself, so running it means translating a task's worth of signal
+    // processor instructions for samples that go nowhere -- which is a large
+    // part of a headless frame, spent on silence.
+    if (n64b::gym_headless()) {
+        return unhandled_microcode;
+    }
     if (module_microcode != nullptr) {
         if (auto *found = reinterpret_cast<RspUcodeFunc *>(module_microcode(task))) {
             return found;
@@ -360,6 +383,8 @@ int main(int argc, char **argv) {
         else if (arg == "--fullscreen") options.fullscreen = true;
         else if (arg == "--developer") options.developer = true;
         else if (arg == "--unpack") options.unpack = next_arg();
+        else if (arg == "--gym") options.gym = next_arg();
+        else if (arg == "--headless") options.headless = true;
         else if (arg == "--help" || arg == "-h") { usage(); return 0; }
         else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
@@ -382,6 +407,23 @@ int main(int argc, char **argv) {
     }
 
     std::string error;
+
+    // A game played by another process. Attached to before anything else
+    // because it decides whether there is a window, a renderer, sound, and a
+    // clock -- and because getting it wrong is a game nobody is holding.
+    if (!options.gym.empty()) {
+        if (!n64b::gym_open(options.gym, options.headless, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        // The retrace stops being a clock and becomes something the caller asks
+        // for. Everything else about the console is unchanged.
+        ultramodern::set_host_paced_retraces(true);
+    } else if (options.headless) {
+        std::fprintf(stderr, "error: --headless is for a game being driven; pass --gym too.\n");
+        return 2;
+    }
+
     std::unique_ptr<n64b::Module> module = n64b::open_module(options.module, error);
     if (module == nullptr) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
@@ -398,12 +440,21 @@ int main(int argc, char **argv) {
 
     // The window has to exist before the renderer, and both have to be on the
     // main thread on this platform.
+    //
+    // Headless there is neither, and the handle is only a pair of pointers the
+    // renderer never looks at -- but it has to be something, because the
+    // runtime reads an empty one as "ask the frontend to make a window".
     ultramodern::renderer::WindowHandle window_handle{};
-    if (!n64b::open_window(desc.display_name, options.fullscreen, window_handle, error)) {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
+    if (n64b::gym_headless()) {
+        window_handle.window = reinterpret_cast<void *>(1);
+        window_handle.view = reinterpret_cast<void *>(1);
+    } else {
+        if (!n64b::open_window(desc.display_name, options.fullscreen, window_handle, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        n64b::init_input();
     }
-    n64b::init_input();
     n64b::install_trace(options.developer);
     // Zero unless this game reaches between its overlays through the CPU's
     // syscall exception, which the runtime has to stand in for.
@@ -530,6 +581,13 @@ int main(int argc, char **argv) {
     // game running as fast as the host can carry it, the thing a static
     // recompilation is for and the thing that makes this game play too quickly.
     double cpu_rate = r4300_instructions_per_second;
+    // A game being driven is not being watched, and holding it to a console's
+    // speed would hold it to a console's speed -- which is the one thing an
+    // environment cannot afford. Its frames end when the game has finished
+    // them, so nothing here needs the processor to take as long as the R4300's.
+    if (n64b::gym_running()) {
+        cpu_rate = 0.0;
+    }
     if (const char *rate = std::getenv("N64B_CPU_RATE")) {
         cpu_rate = std::strtod(rate, nullptr);
     }
@@ -560,7 +618,8 @@ int main(int argc, char **argv) {
     config.project_version = recomp::Version{1, 0, 0};
     config.window_handle = window_handle;
     config.rsp_callbacks = recomp::rsp::callbacks_t{.get_rsp_microcode = select_microcode};
-    config.renderer_callbacks = n64b::renderer_callbacks();
+    config.renderer_callbacks = n64b::gym_headless() ? n64b::headless_renderer_callbacks()
+                                                     : n64b::renderer_callbacks();
     config.audio_callbacks = n64b::audio_callbacks();
     config.input_callbacks = n64b::input_callbacks();
     config.events_callbacks = n64b::events_callbacks();
@@ -570,9 +629,16 @@ int main(int argc, char **argv) {
         .create_gfx = nullptr,
         .create_window = nullptr,
         // Called on the main thread on every turn of librecomp's own loop,
-        // which is the only place AppKit will let events be read.
-        .update_gfx = [](ultramodern::gfx_callbacks_t::gfx_data_t) { n64b::pump_window(); },
+        // which is the only place AppKit will let events be read. There is no
+        // window to read events from when the game is headless.
+        .update_gfx = n64b::gym_headless()
+                          ? nullptr
+                          : +[](ultramodern::gfx_callbacks_t::gfx_data_t) { n64b::pump_window(); },
     };
+
+    // From here the caller's thread drives: it waits for the game to boot, says
+    // so, and then does what it is told a frame at a time.
+    n64b::gym_start();
 
     recomp::start(config);
 

@@ -369,6 +369,51 @@ rather than one.
 all.** Everything the analyser and the runtime know they learned from three
 cartridges, and the next one will teach them something else.
 
+## A game something else is playing
+
+`n64b-run --gym <name>` hands the console to another process. It is the same
+recompiled game; what changes is who decides when a frame happens.
+
+A player's console is paced by a clock, because a television is: the video
+interface interrupts sixty times a second and the game does a frame's work
+between interrupts. Anything that is not a player wants the opposite — a game
+that advances exactly when it is told to and then stops dead, as fast as the
+machine will carry it. So `--gym` takes the retrace off the clock and gives it
+to the caller, and the caller gets back an answer to the only question that
+makes a step meaningful: **has the game finished?**
+
+That question has a real answer, and it is not "has a picture been handed
+over". A frame is over when nothing is left: every thread of the game parked
+waiting for the hardware with nothing runnable above it, every message
+delivered, and every task the game gave the signal processor answered. All
+three are checked, not waited out. The last one is the one that bites — a task
+is answered on another thread long after the game asked, so a console can look
+idle in the instant between the two.
+
+The console's eight megabytes are mapped into both processes, so whoever is
+driving reads the game's own variables — where a character is, how fast they
+are going — as a load rather than a request, and writes the controller into a
+small block beside them. `include/modernreality/gym.h` is the whole protocol.
+
+`--headless` goes with it: no window and no renderer, the game's display lists
+counted and dropped. The game still builds them, because that is its own code
+and not ours to skip; what goes away is drawing them, which is most of the
+time. Super Mario 64 runs at about **5000 frames a second** that way, against
+the 30 a console manages, and eight copies at once on one laptop reach 18 000.
+
+And a game can be put down and picked up again. A savestate here is the
+console's memory plus the registers of every thread, taken while the game is
+quiet and put back into a game that is quiet in the same shape — which is
+checked, thread by thread, because a recompiled thread is a host thread parked
+inside a real call stack and its registers only make sense where it left them.
+It restores into a process that has only just booted, which is what makes it
+useful: play through a game's opening once, and every run after that starts
+where it ended.
+
+What it was built for is [an RL environment](https://github.com/bigmah/rl) that
+learns to make Mario run fast, but nothing here knows anything about Mario, or
+about learning. It is a console with the clock taken out.
+
 ## Legal
 
 **No game data ships here, ever.** No ROM, extracted asset, or Nintendo code;

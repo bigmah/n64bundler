@@ -23,6 +23,14 @@ void vi_callback() {
 void gfx_init_callback() {
     // The renderer is up. Sound can start now without the first buffer being
     // queued against a device that is about to be reconfigured.
+    //
+    // Unless nobody is here to listen: a game being driven headless has no
+    // window, no renderer and no reason to hold an audio device open -- and
+    // opening one per game would mean a machine running thirty of them at once
+    // opening thirty.
+    if (gym_headless()) {
+        return;
+    }
     init_audio();
 }
 

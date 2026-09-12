@@ -35,6 +35,7 @@
 #include <librecomp/rsp.hpp>
 
 extern "C" PTR(void) osViGetCurrentFramebuffer();
+extern "C" PTR(void) osViGetNextFramebuffer();
 
 /// The instructions the recompiled code has stood for, counted a basic block
 /// at a time. Defined in ultramodern beside the scheduler; see RECOMP_CYCLES.
@@ -462,6 +463,13 @@ public:
         // the first thing to look at when a game runs and the window stays
         // black: a width and an origin mean the game configured the video
         // interface, and a framebuffer of zero means it never handed one over.
+        //
+        // `hstart` is the one that says the interface itself is off rather than
+        // pointed somewhere empty. `update_vi` zeroes it while the game has
+        // asked for `osViBlack`, so a game drawing thirty display lists a second
+        // into a black window with hstart at zero is a game whose picture is
+        // switched off -- which is what a savestate restored without the
+        // interface's own state used to leave behind.
         if (developer_) {
             static int frames = 0;
             if (frames % 60 == 0) {
@@ -479,11 +487,13 @@ public:
                 // retire in a second, so it is the number to hold a runtime to.
                 const unsigned long long instructions = recomp_cycles - last_cycles_;
                 std::fprintf(stderr,
-                             "vi: origin 0x%08X width %u, game framebuffer 0x%08X, "
+                             "vi: origin 0x%08X width %u, hstart 0x%08X status 0x%08X next 0x%08X, "
+                             "game framebuffer 0x%08X, "
                              "%llu display lists so far (%llu this second), "
                              "%.1f ms in display lists, %.1f ms presenting, "
                              "%.1fM instructions this second\n",
-                             vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
+                             vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG, vi->VI_H_START_REG,
+                             vi->VI_STATUS_REG, uint32_t(osViGetNextFramebuffer()),
                              uint32_t(osViGetCurrentFramebuffer()),
                              (unsigned long long)frames_,
                              (unsigned long long)(frames_ - last_frames_),

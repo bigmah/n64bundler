@@ -31,6 +31,7 @@ add_executable(n64b-run
     src/hooks.cpp
     src/overlays.cpp
     src/trace.cpp
+    src/gym.cpp
 )
 
 target_include_directories(n64b-run PRIVATE

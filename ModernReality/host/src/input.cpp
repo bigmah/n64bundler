@@ -228,6 +228,12 @@ bool get_input(int controller, uint16_t *buttons_out, float *x_out, float *y_out
     float x = 0.0f;
     float y = 0.0f;
 
+    // A pad another process is holding, for a game being driven rather than
+    // played. It answers port one for the same reason a script does.
+    if (gym_input(controller, buttons_out, x_out, y_out)) {
+        return true;
+    }
+
     // A script holds port one and nothing else, so a second pad still works
     // beside it and a game that reads four ports still sees three empty.
     if (controller == 0 && scripted_input(buttons_out, x_out, y_out)) {

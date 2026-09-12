@@ -1,0 +1,527 @@
+ultramodern: let the host hold the clock, and say when the game is done with a frame
+
+A game does a frame's work and then waits for the video interface to say the
+picture was drawn. `vi_thread_func` is what says so, sixty times a second,
+because that is what a television does -- and for a player that is exactly
+right.
+
+It is wrong for everything that is not a player. Something driving the game
+from outside -- a script, or something learning to play it -- wants the game to
+advance when it is asked to and then stop dead, and wants it to happen as fast
+as the machine manages rather than at the speed of a television. Sixty frames a
+second is also the ceiling on how much of the game such a thing can see, which
+for anything that learns by playing is the whole cost of the exercise.
+
+So the retrace comes off the clock. `set_host_paced_retraces` leaves the VI
+thread with nothing to do and `host_retrace` does what it did, from whichever
+thread asks; the interrupt is identical, only its timing is somebody else's.
+
+The half that is not obvious is knowing when the game has finished reacting.
+A frame is not over when the picture was handed over -- the game is still
+running code the retrace set off, on threads of its own. It is over when
+nothing is left, and that is three things at once: a thread is parked waiting
+for the hardware with nothing runnable above it, no message has been sent that
+has not been delivered, and no task the game gave the signal processor is still
+outstanding. `wait_until_quiescent` checks all three rather than waiting out a
+duration, and an epoch counts the times the game has gone quiet so that a
+caller can tell quiet-about-this-frame from quiet-about-the-one-before.
+
+Two details it took a stuck console to learn. A task handed to the signal
+processor is answered on another thread long after the game asked, so the
+message that ends it can arrive after everything else has gone quiet -- hence
+the count of outstanding work, incremented where the task is submitted rather
+than where it is run. And "nothing runnable" has to mean nothing runnable
+*above the parked thread*: the idle thread of every game sits in the running
+queue at priority zero behind whoever swapped away from it, for the whole life
+of the game, so a test for an empty queue calls every frame unfinished.
+
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -51,6 +51,15 @@
+ bool thread_queue_contains(RDRAM_ARG PTR(PTR(OSThread)) queue_, PTR(OSThread) t_);
+ bool thread_queue_empty(RDRAM_ARG PTR(PTR(OSThread)) queue);
+ PTR(OSThread) thread_queue_peek(RDRAM_ARG PTR(PTR(OSThread)) queue);
++/// Whether a thread the scheduler has made runnable is waiting its turn. The
++/// running queue is the one queue that is not in the game's memory, so this is
++/// answerable without rdram.
++bool threads_waiting_to_run();
++/// Whether one of them would take the processor from a thread running at this
++/// priority, which is the only kind of waiting that means a frame is not over.
++bool runnable_above(int priority);
++/// Who they are, in words.
++void describe_running_queue(RDRAM_ARG char* out, size_t size);
+ 
+ // Message queues.
+ enum class EventMessageSource : int {
+@@ -111,6 +120,70 @@
+ void sleep_milliseconds(uint32_t millis);
+ void sleep_until(const std::chrono::high_resolution_clock::time_point& time_point);
+ 
++// --- A console somebody else holds the clock for -----------------------------
++//
++// Nothing in a game asks for a frame. It does a frame's work and then waits for
++// the video interface to say the picture was drawn, and the interface says so
++// sixty times a second because that is what a television does. `vi_thread_func`
++// is that television, and it is what keeps a game running at the speed a player
++// sees it at.
++//
++// A player is not the only thing that can be at the other end of a game. A
++// script driving it, or something learning to play it, wants the opposite deal:
++// the game should advance exactly when it is asked to and then stop dead, so
++// that whatever reads the result reads a console with nothing left to do rather
++// than one halfway through a frame. It is also the only way to run faster than
++// sixty frames a second, which is usually the reason for asking.
++//
++// So the retrace can be taken off the clock and given to the host.
++// `host_retrace` is one interrupt of the video interface; `wait_until_quiescent`
++// is the other half of it, and returns once every thread of the game is parked
++// waiting for the hardware again and the hardware has nothing outstanding. That
++// is the console's own account of "done with that frame", and it is checked
++// rather than waited out.
++void set_host_paced_retraces(bool on);
++bool host_paced_retraces();
++void host_retrace();
++
++/// How many times the game has gone quiet. Read this before asking for a
++/// retrace and then wait for a number above it: a console that is quiet because
++/// it has not been poked yet is quiet about the frame before.
++uint64_t quiescent_epoch();
++
++/// Wait until the game goes quiet again past `epoch`. False if it did not
++/// within the timeout, which means a game still working -- or one waiting for
++/// something that is never coming.
++bool wait_until_quiescent(uint64_t epoch, uint32_t timeout_ms);
++
++/// Whether the game is quiet at this instant. Only ever true to the thread that
++/// last drove a retrace and is now asking, since nothing else is running.
++bool is_quiescent();
++
++/// Why it is not, in words, for when a frame never ends.
++void describe_quiescence(RDRAM_ARG char* out, size_t size);
++
++/// Work the game handed to a device and has not been told the end of. A retrace
++/// is not over while one of these is outstanding, because the message that ends
++/// it has not been sent yet.
++void hardware_work_started();
++void hardware_work_finished();
++
++/// Whether a device still owes the game an answer. Handing the console another
++/// retrace while this is true piles up work it cannot act on yet.
++bool hardware_busy();
++
++// --- what a thread's registers are, to something outside the game ------------
++//
++// A recompiled thread keeps the processor's registers in a structure of its
++// own, on its host thread's stack, and nothing but that thread ever reads it.
++// Saving the state of a running game means reading it: the console's memory is
++// most of the state, but the registers of a thread parked in the middle of a
++// function are the rest, and a memory image put back without them resumes every
++// thread holding somebody else's register file.
++void set_thread_registers(PTR(OSThread) thread, void* registers);
++void forget_thread_registers(PTR(OSThread) thread);
++void for_each_thread_registers(void (*visit)(PTR(OSThread) thread, void* registers, void* user), void* user);
++
+ /// Hold the recompiled code to the rate the console's processor managed.
+ ///
+ /// Zero, the default, is as fast as the host can go -- which is what a
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -184,6 +184,72 @@
+ 
+ void set_dummy_vi(bool odd);
+ 
++/// One interrupt of the video interface: what the console does to the picture
++/// and what it tells the game about it.
++///
++/// Split out of the thread below because it is no longer only that thread's to
++/// do. With `ultramodern::set_host_paced_retraces` the caller of
++/// `ultramodern::host_retrace` does it instead, at whatever moments it likes,
++/// which is how a game gets driven by something that is not a clock.
++static int remaining_retraces = 1;
++
++static void do_retrace() {
++    // If the game hasn't started yet, set a dummy VI mode and origin.
++    if (!ultramodern::is_game_started()) {
++        static bool odd = false;
++        set_dummy_vi(odd);
++        odd = !odd;
++
++        events_context.action_queue.enqueue(DummyWorkloadAction{events_context.vi.get_next_state()->framebuffer});
++    }
++
++    // Queue a screen update for the graphics thread with the current VI register state.
++    // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
++    events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++
++    // Update VI registers and swap VI modes.
++    events_context.vi.update_vi();
++
++    // If the game has started, handle sending VI and AI events.
++    if (ultramodern::is_game_started()) {
++        remaining_retraces--;
++
++        std::lock_guard lock{ events_context.message_mutex };
++        ViState* cur_state = events_context.vi.get_cur_state();
++        if (remaining_retraces == 0) {
++            if (cur_state->mq != NULLPTR) {
++                // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
++                // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next.
++                ultramodern::enqueue_external_message_src(cur_state->mq, cur_state->msg, false, ultramodern::EventMessageSource::Vi);
++            }
++            remaining_retraces = cur_state->retrace_count;
++        }
++        if (events_context.ai.mq != NULLPTR) {
++            // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
++            ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
++        }
++    }
++
++    if (events_callbacks.vi_callback != nullptr) {
++        events_callbacks.vi_callback();
++    }
++}
++
++static std::atomic_bool retraces_are_the_hosts = false;
++
++void ultramodern::set_host_paced_retraces(bool on) {
++    retraces_are_the_hosts.store(on);
++}
++
++bool ultramodern::host_paced_retraces() {
++    return retraces_are_the_hosts.load();
++}
++
++void ultramodern::host_retrace() {
++    total_vis++;
++    do_retrace();
++}
++
+ void vi_thread_func() {
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows
+@@ -191,9 +257,14 @@
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Critical);
+     using namespace std::chrono_literals;
+ 
+-    int remaining_retraces = 1;
+-
+     while (!exited) {
++        // Somebody else is the clock. Nothing to do here but stay out of the
++        // way -- the retraces arrive from whoever is driving the game, and
++        // there is exactly one of them, so there is nothing to hand over.
++        if (ultramodern::host_paced_retraces()) {
++            ultramodern::sleep_milliseconds(1);
++            continue;
++        }
+         // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
+         auto next = ultramodern::get_start() + (total_vis * 1000000us) / (60 * ultramodern::get_speed_multiplier());
+         //if (next > std::chrono::high_resolution_clock::now()) {
+@@ -218,45 +289,7 @@
+         }
+         total_vis = new_total_vis;
+ 
+-        // If the game hasn't started yet, set a dummy VI mode and origin.
+-        if (!ultramodern::is_game_started()) {
+-            static bool odd = false;
+-            set_dummy_vi(odd);
+-            odd = !odd;
+-
+-            events_context.action_queue.enqueue(DummyWorkloadAction{events_context.vi.get_next_state()->framebuffer});
+-        }
+-
+-        // Queue a screen update for the graphics thread with the current VI register state.
+-        // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
+-        events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+-
+-        // Update VI registers and swap VI modes.
+-        events_context.vi.update_vi();
+-
+-        // If the game has started, handle sending VI and AI events.
+-        if (ultramodern::is_game_started()) {
+-            remaining_retraces--;
+-            
+-            std::lock_guard lock{ events_context.message_mutex };
+-            ViState* cur_state = events_context.vi.get_cur_state();
+-            if (remaining_retraces == 0) {
+-                if (cur_state->mq != NULLPTR) {
+-                    // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
+-                    // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next. 
+-                    ultramodern::enqueue_external_message_src(cur_state->mq, cur_state->msg, false, ultramodern::EventMessageSource::Vi);
+-                }
+-                remaining_retraces = cur_state->retrace_count;
+-            }
+-            if (events_context.ai.mq != NULLPTR) {
+-                // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
+-                ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
+-            }
+-        }
+-
+-        if (events_callbacks.vi_callback != nullptr) {
+-            events_callbacks.vi_callback();
+-        }
++        do_retrace();
+     }
+ }
+ 
+@@ -295,6 +328,7 @@
+ 
+         // Tell the game that the RSP has completed
+         sp_complete();
++        ultramodern::hardware_work_finished();
+     }
+ }
+ 
+@@ -379,6 +413,7 @@
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
+                 dp_complete();
++                ultramodern::hardware_work_finished();
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);
+                 ultramodern::extensions::on_displaylist_completed(displaylist);
+@@ -565,6 +600,12 @@
+ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+     OSTask* task = TO_PTR(OSTask, task_);
+ 
++    // The signal processor is busy from here until whichever thread runs the
++    // task says it is done. Anything asking whether the console has finished
++    // the frame has to know that, because the message that ends this task has
++    // not been sent yet and the game is waiting for it.
++    ultramodern::hardware_work_started();
++
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+         events_context.action_queue.enqueue(SpTaskAction{ *task });
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -1,5 +1,8 @@
+ #include <bitset>
+ #include <thread>
++#include <condition_variable>
++#include <climits>
++#include <mutex>
+ 
+ #include "blockingconcurrentqueue.h"
+ 
+@@ -60,9 +63,112 @@
+     }
+ }
+ 
++// --- when the console has nothing left to do ---------------------------------
++//
++// A thread that waits here is waiting for the hardware, and it is the last one:
++// every other thread of the game is on a message queue, and whichever of them
++// should be running next would be running instead of this. So a game parked
++// here with nothing on its way to it is a game that has finished everything the
++// last interrupt gave it to do -- which is the question something driving the
++// console a frame at a time has to be able to ask, and the only honest answer to
++// it. A frame is not over when the picture was handed over; it is over when
++// nothing is left.
++//
++// Three things have to be true at once, and they are checked rather than waited
++// out. Nobody is running: a thread is parked here, and no thread the scheduler
++// has made runnable is waiting its turn. Nothing has been said that has not been
++// heard: the queue below is empty. And no device is still working: every task
++// handed to the signal processor has been answered, which is what
++// `hardware_work_started` and `hardware_work_finished` count, because the
++// message that ends one of those arrives long after the game asked for it.
++//
++// The epoch is what makes this usable without a race. It counts the times the
++// game has gone quiet, so a caller reads it, pokes the console, and waits for a
++// number above the one it read: quiet about the frame before is not quiet about
++// this one.
++namespace {
++std::mutex quiet_mutex;
++std::condition_variable quiet_changed;
++bool parked_for_hardware = false;
++int hardware_in_flight = 0;
++uint64_t quiet_epoch = 0;
++
++/// Which thread is parked, and what it would be preempted by. A thread waiting
++/// for the hardware is the running one as far as the game is concerned, so what
++/// counts as work outstanding is measured against its priority.
++PTR(OSThread) parked_thread = NULLPTR;
++int parked_priority = INT_MIN;
++
++bool nothing_left_to_do() {
++    return parked_for_hardware && hardware_in_flight == 0 &&
++           external_messages.size_approx() == 0 && !ultramodern::runnable_above(parked_priority);
++}
++
++void park_for_hardware(RDRAM_ARG1) {
++    const PTR(OSThread) self = ultramodern::this_thread();
++    const int priority = self == NULLPTR ? INT_MIN : TO_PTR(OSThread, self)->priority;
++    std::lock_guard lock{ quiet_mutex };
++    parked_for_hardware = true;
++    parked_thread = self;
++    parked_priority = priority;
++    quiet_epoch++;
++    quiet_changed.notify_all();
++}
++
++void unpark_from_hardware() {
++    std::lock_guard lock{ quiet_mutex };
++    parked_for_hardware = false;
++}
++} // namespace
++
++void ultramodern::hardware_work_started() {
++    std::lock_guard lock{ quiet_mutex };
++    hardware_in_flight++;
++}
++
++void ultramodern::hardware_work_finished() {
++    std::lock_guard lock{ quiet_mutex };
++    hardware_in_flight--;
++    quiet_changed.notify_all();
++}
++
++uint64_t ultramodern::quiescent_epoch() {
++    std::lock_guard lock{ quiet_mutex };
++    return quiet_epoch;
++}
++
++void ultramodern::describe_quiescence(RDRAM_ARG char* out, size_t size) {
++    char runnable[192];
++    ultramodern::describe_running_queue(PASS_RDRAM runnable, sizeof(runnable));
++    std::lock_guard lock{ quiet_mutex };
++    std::snprintf(out, size,
++                  "thread %d is %s at priority %d, %d task(s) outstanding, %zu message(s) undelivered, %s",
++                  parked_thread == NULLPTR ? -1 : TO_PTR(OSThread, parked_thread)->id,
++                  parked_for_hardware ? "parked" : "running", parked_priority, hardware_in_flight,
++                  external_messages.size_approx(), runnable);
++}
++
++bool ultramodern::hardware_busy() {
++    std::lock_guard lock{ quiet_mutex };
++    return hardware_in_flight > 0;
++}
++
++bool ultramodern::is_quiescent() {
++    std::lock_guard lock{ quiet_mutex };
++    return nothing_left_to_do();
++}
++
++bool ultramodern::wait_until_quiescent(uint64_t epoch, uint32_t timeout_ms) {
++    std::unique_lock lock{ quiet_mutex };
++    return quiet_changed.wait_for(lock, std::chrono::milliseconds{ timeout_ms },
++                                  [epoch]() { return quiet_epoch > epoch && nothing_left_to_do(); });
++}
++
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+     QueuedMessage to_send;
++    park_for_hardware(PASS_RDRAM1);
+     external_messages.wait_dequeue(to_send);
++    unpark_from_hardware();
+     if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+         external_messages.enqueue(to_send);
+     }
+@@ -70,7 +176,10 @@
+ 
+ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+     QueuedMessage to_send;
+-    if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
++    park_for_hardware(PASS_RDRAM1);
++    const bool got_one = external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis});
++    unpark_from_hardware();
++    if (got_one) {
+         if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
+             external_messages.enqueue(to_send);
+         }
+--- a/ultramodern/src/threadqueue.cpp
++++ b/ultramodern/src/threadqueue.cpp
+@@ -1,10 +1,70 @@
+ #include <cstdio>
+ #include <cassert>
++#include <atomic>
++#include <climits>
+ 
+ #include "ultramodern/ultramodern.hpp"
+ 
+ static PTR(OSThread) running_queue_impl = NULLPTR;
+ 
++/// The priority of the thread at the head of the running queue, or nothing.
++///
++/// Kept as a number beside the queue because the one thing that has to ask
++/// about it -- whether the console has finished a frame, from a thread that is
++/// not the game's -- cannot walk a list in the game's memory while the game is
++/// walking it. The queue is only ever changed from a game thread, and every
++/// such change comes through this file.
++static std::atomic<int> runnable_top{INT_MIN};
++
++static void note_running_queue(RDRAM_ARG1) {
++    runnable_top.store(running_queue_impl == NULLPTR
++                           ? INT_MIN
++                           : TO_PTR(OSThread, running_queue_impl)->priority,
++                       std::memory_order_relaxed);
++}
++
++/// Whether a thread the scheduler is holding would take the processor from one
++/// running at `priority`.
++///
++/// This is the question, rather than "is anything runnable at all". A thread
++/// waiting at a lower priority than the one that is running is not work
++/// outstanding: it is a thread that will not run until the one above it stops,
++/// and the idle thread of every game spends its whole life in exactly that
++/// position -- queued, at priority zero, behind whichever thread swapped away
++/// from it. Treating that as an unfinished frame means every frame is
++/// unfinished.
++bool ultramodern::runnable_above(int priority) {
++    return runnable_top.load(std::memory_order_relaxed) > priority;
++}
++
++/// Whether the scheduler is holding a thread that ought to be running.
++///
++/// The running queue is the one queue that is not in the game's memory, so
++/// asking about it is the one question about the scheduler that can be asked
++/// without rdram -- which is what something outside the game has to do to find
++/// out whether the console is between frames or in the middle of one. A thread
++/// waiting here is a frame that is not finished, however quiet the rest of it
++/// looks: see `nothing_left_to_do` in mesgqueue.cpp.
++bool ultramodern::threads_waiting_to_run() {
++    return running_queue_impl != NULLPTR;
++}
++
++/// Who they are, for when nothing is running and somebody is waiting to.
++void ultramodern::describe_running_queue(RDRAM_ARG char* out, size_t size) {
++    int written = std::snprintf(out, size, "runnable:");
++    PTR(OSThread) cur = running_queue_impl;
++    if (cur == NULLPTR) {
++        std::snprintf(out + written, size - size_t(written), " nobody");
++        return;
++    }
++    while (cur != NULLPTR && size_t(written) < size) {
++        OSThread* thread = TO_PTR(OSThread, cur);
++        written += std::snprintf(out + written, size - size_t(written), " thread %d (priority %d, state %d)",
++                                 thread->id, thread->priority, (int)thread->state);
++        cur = thread->next;
++    }
++}
++
+ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
+     if (queue == ultramodern::running_queue) {
+         return &running_queue_impl;
+@@ -54,6 +114,7 @@
+     toadd->next = (*cur);
+     toadd->queue = queue_;
+     *cur = toadd_;
++    note_running_queue(PASS_RDRAM1);
+ 
+     debug_printf("  Contains:");
+     cur = queue_to_ptr(PASS_RDRAM queue_);
+@@ -69,6 +130,7 @@
+     PTR(OSThread) ret = *queue;
+     *queue = TO_PTR(OSThread, ret)->next;
+     TO_PTR(OSThread, ret)->queue = NULLPTR;
++    note_running_queue(PASS_RDRAM1);
+     debug_printf("[Thread Queue] Popped thread %d from queue 0x%08X\n", TO_PTR(OSThread, ret)->id, (uintptr_t)queue_);
+     return ret;
+ }
+@@ -95,6 +157,7 @@
+         if (*cur == t_) {
+             *cur = TO_PTR(OSThread, t_)->next;
+             TO_PTR(OSThread, t_)->next = NULLPTR;
++            note_running_queue(PASS_RDRAM1);
+             return true;
+         }
+         cur = &TO_PTR(OSThread, *cur)->next;

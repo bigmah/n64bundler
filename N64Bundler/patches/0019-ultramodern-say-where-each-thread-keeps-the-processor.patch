@@ -1,0 +1,85 @@
+ultramodern: say where each thread keeps the processor
+
+A recompiled thread's registers are a structure on its own host thread's stack.
+Nothing else has ever needed to see one, because nothing else is that thread.
+
+Saving the state of a running game needs to see all of them. The console's
+memory is nearly all of the state -- the game's variables, its stacks, its
+message queues -- but a thread parked inside a function left what it cares
+about in registers, and a memory image put back without them resumes every
+thread of the game holding numbers that belong to whatever the process was
+doing when the image was taken.
+
+So each thread writes down where its registers are while it is running, and
+something outside the game can walk them. The map is keyed by the thread's own
+OSThread, which is the one name for a thread that means the same thing in a
+saved state as in the process reading one: it is an address in the game's
+memory, and a game puts its threads in the same place every time it boots.
+
+The registering is done in librecomp, which is where the registers are made;
+this is the map and the two calls that maintain it.
+
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -1,7 +1,9 @@
+ #include <cstdio>
+ #include <thread>
+ #include <cassert>
++#include <mutex>
+ #include <string>
++#include <unordered_map>
+ 
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+@@ -388,6 +390,51 @@
+     return thread_self;
+ }
+ 
++// --- where each thread keeps the processor -----------------------------------
++//
++// A thread's registers are a structure on its own host thread's stack, made by
++// `run_thread_function` and passed down through every recompiled function it
++// calls. Nothing else has ever needed to see one, because nothing else is that
++// thread.
++//
++// Saving the state of a running game needs to see all of them. The console's
++// memory holds nearly everything -- the game's variables, its stacks, its
++// message queues -- but a thread parked inside a function left the values it
++// cares about in registers, and a memory image put back without them resumes
++// every thread of the game holding numbers that belong to whatever the process
++// was doing at the moment the image was taken.
++//
++// So each thread writes down where its registers are while it runs. The map is
++// keyed by the thread's own OSThread, which is the name for a thread that means
++// the same thing in a saved state as it does in the process reading one: it is
++// an address in the game's memory, and the game puts its threads in the same
++// place every time it boots.
++static std::mutex thread_registers_mutex;
++static std::unordered_map<PTR(OSThread), void*> thread_registers;
++
++void ultramodern::set_thread_registers(PTR(OSThread) thread, void* registers) {
++    if (thread == NULLPTR) {
++        return;
++    }
++    std::lock_guard lock{ thread_registers_mutex };
++    thread_registers[thread] = registers;
++}
++
++void ultramodern::forget_thread_registers(PTR(OSThread) thread) {
++    if (thread == NULLPTR) {
++        return;
++    }
++    std::lock_guard lock{ thread_registers_mutex };
++    thread_registers.erase(thread);
++}
++
++void ultramodern::for_each_thread_registers(void (*visit)(PTR(OSThread), void*, void*), void* user) {
++    std::lock_guard lock{ thread_registers_mutex };
++    for (const auto& [thread, registers] : thread_registers) {
++        visit(thread, registers, user);
++    }
++}
++
+ static std::thread thread_cleaner_thread;
+ static moodycamel::BlockingConcurrentQueue<UltraThreadContext*> deleted_threads{};
+ extern std::atomic_bool exited;

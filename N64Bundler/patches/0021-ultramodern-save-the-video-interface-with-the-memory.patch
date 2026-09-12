@@ -1,0 +1,135 @@
+ultramodern: let the video interface be saved and put back with the memory
+
+A savestate here is the console's eight megabytes plus the registers of every
+thread, and the registers are in it for a reason that turns out to have a second
+half. A thread of a recompiled game keeps the processor's registers outside the
+game's memory, so a memory image alone restores every thread holding somebody
+else's register file. The video interface is the same shape of problem. A game
+tells it what to do through libultra -- which mode, which framebuffer, whether
+the picture is blanked -- and libultra kept that in the VI manager rather than
+in the game's memory, so ultramodern keeps it in `events_context.vi`. None of it
+is in a memory image either.
+
+For `osViBlack` that is the whole difference between a game you can see and one
+you cannot. Every game blanks the screen on its way up and unblanks it on the
+frame it first has something to show. A state is taken long after that frame and
+restored into a console that has only just booted, so the game resumes in a level
+while the interface is still switched off -- and the game will never say
+`osViBlack(FALSE)` again, because it said it in a process that is gone. What that
+looks like is a game that boots, runs, plays its music, answers the controller
+and draws every display list RT64 asks for, behind a window that stays black.
+`update_vi` zeroes hStart while VI_STATE_BLACK is set, so the raster is blank and
+nothing else about the console is wrong.
+
+So the interface travels with the memory. `save_vi` and `load_vi` are the two
+halves of it, and `ViSnapshot` is the state in a shape that can go in a file: the
+same fields, with `mode` as an address in the console's memory rather than a
+pointer into this process's copy of it, since that is the one field whose value
+means nothing to whoever reads the file.
+
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -183,7 +183,47 @@
+ void set_thread_registers(PTR(OSThread) thread, void* registers);
+ void forget_thread_registers(PTR(OSThread) thread);
+ void for_each_thread_registers(void (*visit)(PTR(OSThread) thread, void* registers, void* user), void* user);
++
++// --- what the video interface is set to, to something outside the game -------
++//
++// The same problem as the registers above, for the same reason. A game tells
++// the video interface what to do once and then forgets: which mode it is in,
++// which framebuffer it is scanning, whether the picture is blanked. libultra
++// kept that in the VI manager rather than in the game's own memory, so this
++// keeps it here -- which means none of it is in a memory image, and a game put
++// back from one has no way to say it again. It made those calls in a process
++// that is gone.
++//
++// For `osViBlack` that is the whole picture. Every game blanks the screen while
++// it boots and unblanks it when it first has something to show, so a state
++// taken in a level and restored into a console still booting resumes a game
++// that runs, plays its music and moves -- behind a raster that was switched off
++// before the state began and is never switched on again. The window stays
++// black, and nothing about the game is wrong.
++//
++// So the interface travels with the memory. This is that state in the shape a
++// caller can write to a file: `mode` is an address in the console's memory
++// rather than a pointer into this process's copy of it, and everything else is
++// as it is kept.
++struct ViSnapshot {
++    struct State {
++        PTR(OSViMode) mode; // NULLPTR when the game has not set one yet
++        PTR(void) framebuffer;
++        PTR(OSMesg) mq;
++        OSMesg msg;
++        uint32_t state;
++        uint32_t control;
++        int32_t retrace_count;
++    } states[2];
++    ultramodern::renderer::ViRegs regs;
++    int32_t cur_state;
++    int32_t field;
++    int32_t remaining_retraces;
++};
+ 
++void save_vi(RDRAM_ARG ViSnapshot* out);
++void load_vi(RDRAM_ARG const ViSnapshot* in);
++
+ /// Hold the recompiled code to the rate the console's processor managed.
+ ///
+ /// Zero, the default, is as fast as the host can go -- which is what a
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -250,6 +250,53 @@
+     do_retrace();
+ }
+ 
++// --- the video interface, put down and picked up again -----------------------
++//
++// See `ViSnapshot` in ultramodern.hpp for why this is not in the console's
++// memory and why a savestate has to carry it anyway. The only translation on
++// the way through is `mode`, which is kept in here as a pointer into this
++// process's copy of the console's memory and has to leave as an address in it.
++
++void ultramodern::save_vi(RDRAM_ARG ViSnapshot* out) {
++    std::lock_guard lock{ events_context.message_mutex };
++    for (int i = 0; i < 2; i++) {
++        const ::ViState& from = events_context.vi.states[i];
++        ViSnapshot::State& to = out->states[i];
++        to.mode = from.mode == nullptr
++                      ? PTR(OSViMode)(NULLPTR)
++                      : PTR(OSViMode)(0x80000000u + uint32_t(reinterpret_cast<const uint8_t*>(from.mode) - rdram));
++        to.framebuffer = from.framebuffer;
++        to.mq = from.mq;
++        to.msg = from.msg;
++        to.state = from.state;
++        to.control = from.control;
++        to.retrace_count = from.retrace_count;
++    }
++    out->regs = events_context.vi.regs;
++    out->cur_state = events_context.vi.cur_state;
++    out->field = events_context.vi.field;
++    out->remaining_retraces = remaining_retraces;
++}
++
++void ultramodern::load_vi(RDRAM_ARG const ViSnapshot* in) {
++    std::lock_guard lock{ events_context.message_mutex };
++    for (int i = 0; i < 2; i++) {
++        const ViSnapshot::State& from = in->states[i];
++        ::ViState& to = events_context.vi.states[i];
++        to.mode = from.mode == NULLPTR ? nullptr : TO_PTR(OSViMode, from.mode);
++        to.framebuffer = from.framebuffer;
++        to.mq = from.mq;
++        to.msg = from.msg;
++        to.state = from.state;
++        to.control = from.control;
++        to.retrace_count = from.retrace_count;
++    }
++    events_context.vi.regs = in->regs;
++    events_context.vi.cur_state = in->cur_state;
++    events_context.vi.field = in->field;
++    remaining_retraces = in->remaining_retraces;
++}
++
+ void vi_thread_func() {
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows

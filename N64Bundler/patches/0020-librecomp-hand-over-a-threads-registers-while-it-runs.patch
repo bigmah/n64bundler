@@ -1,0 +1,33 @@
+librecomp: hand over a thread's registers while it runs
+
+`run_thread_function` is where a thread's register file is made, and it is a
+local: it exists exactly as long as that call does. The map in ultramodern that
+something outside the game reads it through therefore has to be given it here,
+and taken back here -- including when the call ends by being thrown out of,
+which is how a thread that destroys itself leaves.
+
+Handing a saved state a pointer to the stack of a thread that has gone is the
+one way this can be wrong, so the removal is a destructor rather than a line at
+the end.
+
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -526,6 +526,18 @@
+     if (game_entry.thread_create_callback != nullptr) {
+         game_entry.thread_create_callback(rdram, &ctx);
+     }
++
++    // Say where this thread keeps the processor, for as long as it has one.
++    //
++    // This context is the thread's register file and it lives on this stack, so
++    // it exists exactly as long as this call does -- including when the call
++    // ends by being thrown out of, which is how a thread that destroys itself
++    // leaves. Whoever is reading the registers of a parked thread must not be
++    // handed the stack of a thread that has gone.
++    struct RegistersWhileRunning {
++        ~RegistersWhileRunning() { ultramodern::forget_thread_registers(ultramodern::this_thread()); }
++    } registers_while_running;
++    ultramodern::set_thread_registers(ultramodern::this_thread(), &ctx);
+ 
+     recomp_func_t* func = get_function(addr);
+     func(rdram, &ctx);

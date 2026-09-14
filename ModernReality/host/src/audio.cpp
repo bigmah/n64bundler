@@ -16,6 +16,8 @@
 
 #include <SDL.h>
 
+#include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -33,11 +35,87 @@ std::mutex stream_mutex;
 int device_frequency = 48000;
 int game_frequency = 32000;
 
+// --- sound for a game that is not on a clock ---------------------------------
+//
+// In gym mode the caller decides when frames happen, and it does not hand them
+// over evenly. A window watching a policy play gets two frames of Super Mario
+// 64 as fast as they run, then nothing for a fifteenth of a second, so the
+// sound arrives in bursts the device has to last between. And whenever the
+// caller runs frames with no pacing at all -- booting, loading a state, playing
+// into the start of an episode -- it arrives faster than anything can play it.
+//
+// Super Mario 64 makes about as much sound per retrace whatever is still
+// waiting (530 frames at 32 kHz, give or take a few), so neither of those fixes
+// itself. What arrives early stays early: a window watching a policy play
+// heard 2.1 seconds of delay after boot and 4.1 after its first episode began,
+// and flat in between. What arrives short stays short: 60 retraces of 530 is
+// 31,800 frames a second against 32,000 played, and without that backlog to
+// hide it, the queue ran dry once or twice a second.
+//
+// So in gym mode the queue is kept honest from both ends. The game is told
+// there is a little less waiting than there is, which makes it build a cushion
+// to last out the gaps; and audio that has stayed queued for a whole window
+// without the device ever getting down to it is dropped, to a little above that
+// cushion. Measured on that same window: 31 to 119 ms queued, no short buffers
+// in steady state, and a second or so after a new episode starts before the
+// delay is gone again.
+//
+// Only in gym mode. A game run for a player gets its retraces evenly from the
+// VI thread, and a game with its own idea of how much to keep queued should not
+// have it cut away.
+
+/// What the game is not told about, so that it keeps this much more queued.
+constexpr int kCushionMs = 30;
+
+/// How much of the queue's low point over a window is kept; the rest is
+/// backlog. It has to sit above the cushion by more than one pull of the
+/// device, or the cushion the game builds is cut away as it is built. The
+/// window has to be longer than the gaps between the caller's bursts of frames,
+/// or the part of each burst still to be played looks like part that never
+/// will be.
+constexpr int kBacklogKeptMs = 60;
+constexpr int kBacklogWindowMs = 500;
+
+/// The least audio the device found waiting over the current window, and how
+/// much it has taken so far in it, both in bytes of the device's format.
+int least_waiting = INT_MAX;
+int window_taken = 0;
+
+int device_bytes_for_ms(int ms) {
+    return device_frequency * ms / 1000 * kBytesPerFrame;
+}
+
+/// Drops what has been queued longer than the device ever needed, oldest first:
+/// the sound of frames nobody saw at the speed they ran.
+void shed_backlog(int length) {
+    const int waiting = SDL_AudioStreamAvailable(stream);
+    least_waiting = std::min(least_waiting, waiting);
+    window_taken += length;
+    if (window_taken < device_bytes_for_ms(kBacklogWindowMs)) {
+        return;
+    }
+    int excess = least_waiting - device_bytes_for_ms(kBacklogKeptMs);
+    excess -= excess % kBytesPerFrame;
+    uint8_t dropped[4096];
+    while (excess > 0) {
+        const int got = SDL_AudioStreamGet(stream, dropped, std::min(excess, int(sizeof(dropped))));
+        if (got <= 0) {
+            break;
+        }
+        excess -= got;
+    }
+    least_waiting = INT_MAX;
+    window_taken = 0;
+}
+
 /// Pulls whatever the resampler has ready into SDL's own buffer.
 void audio_callback(void *userdata, uint8_t *out, int length) {
     std::lock_guard<std::mutex> lock(stream_mutex);
     int written = 0;
     if (stream != nullptr) {
+        if (gym_running()) {
+            shed_backlog(length);
+        }
         written = SDL_AudioStreamGet(stream, out, length);
         if (written < 0) {
             written = 0;
@@ -103,7 +181,10 @@ size_t frames_remaining() {
     }
     // What SDL still holds is in device frames; the game thinks in its own
     // rate, so convert back or a rate mismatch shows up as stutter.
-    const int queued_bytes = SDL_AudioStreamAvailable(stream);
+    int queued_bytes = SDL_AudioStreamAvailable(stream);
+    if (gym_running()) {
+        queued_bytes = std::max(0, queued_bytes - device_bytes_for_ms(kCushionMs));
+    }
     const double device_frames = double(queued_bytes) / double(kBytesPerFrame);
     return size_t(device_frames * double(game_frequency) / double(device_frequency));
 }
@@ -127,6 +208,8 @@ void set_frequency(uint32_t frequency) {
     if (stream != nullptr) {
         SDL_FreeAudioStream(stream);
     }
+    least_waiting = INT_MAX;
+    window_taken = 0;
     stream = SDL_NewAudioStream(AUDIO_S16SYS, kChannels, game_frequency,
                                 AUDIO_S16SYS, kChannels, device_frequency);
     if (stream == nullptr) {

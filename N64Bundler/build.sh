@@ -80,16 +80,18 @@ done
 step "Applying the patches to the vendored runtimes"
 RECOMP_SRC="$MR_SRC/vendor/N64ModernRuntime/N64Recomp"
 RUNTIME_SRC="$MR_SRC/vendor/N64ModernRuntime"
+RT64_SRC="$MR_SRC/vendor/rt64"
 
-# A patch names the checkout it belongs to, because there are two of them and
-# N64Recomp is a submodule of the other: 0001-n64recomp-... applies inside
-# N64Recomp, 0002-librecomp-... in the runtime around it.
+# A patch names the checkout it belongs to, because there are three of them and
+# N64Recomp is a submodule of one: 0001-n64recomp-... applies inside N64Recomp,
+# 0002-librecomp-... in the runtime around it, and 0023-rt64-... in the renderer.
 patches_for() {
   for patch in "$HERE"/patches/*.patch; do
     [ -f "$patch" ] || continue
     case "$(basename "$patch")" in
       *-n64recomp-*)                 [ "$1" = recomp ]  && printf '%s\n' "$patch" ;;
       *-librecomp-*|*-ultramodern-*) [ "$1" = runtime ] && printf '%s\n' "$patch" ;;
+      *-rt64-*)                      [ "$1" = rt64 ]    && printf '%s\n' "$patch" ;;
       *) echo "$(basename "$patch") does not say which checkout it applies to" >&2; exit 1 ;;
     esac
   done
@@ -124,10 +126,11 @@ series_matches() {
   return $rc
 }
 
-for which in recomp runtime; do
+for which in recomp runtime rt64; do
   case "$which" in
     recomp)  target="$RECOMP_SRC" ;;
     runtime) target="$RUNTIME_SRC" ;;
+    rt64)    target="$RT64_SRC" ;;
   esac
   if series_matches "$target" "$which"; then
     echo "    $(basename "$target") already carries its patches"

@@ -1,0 +1,81 @@
+rt64: draw only into the console's memory
+
+RT64 draws a frame twice. Rendering to RAM -- on by default -- replays each
+framebuffer pair at the console's own resolution and copies the result back into
+RDRAM, which is what the RDP did and what a game that reads its own framebuffer
+needs. Then the workload queue renders the frame again at the window's
+resolution, and the present queue shows it.
+
+A caller that only wants the frame out of the console's memory needs the first
+and neither of the others, and the others are what hold it back. The workload
+queue is a ring the render thread empties, and the present queue waits on the
+display for a drawable, so a game stepped faster than the screen refreshes spends
+its graphics thread spinning in `advanceToNextWorkload` for a slot: a hundred and
+twenty agent steps a second, whatever the machine could do.
+
+`ApplicationConfiguration::renderOnlyToRAM` renders to RAM whatever the emulator
+configuration says, hands no workload to the render thread -- the same one is
+reset and filled again by the next display list -- and presents nothing. The
+swap chain is still made, on whatever window the application was given.
+
+--- a/src/hle/rt64_application.h
++++ b/src/hle/rt64_application.h
+@@ -40,6 +40,11 @@ namespace RT64 {
+         std::filesystem::path dataPath;
+         bool detectDataPath = true;
+         bool useConfigurationFile = true;
++
++        // Draw each frame into the console's memory at its native resolution, as the RDP would,
++        // and nowhere else: no high resolution render, and nothing presented to the window. For
++        // a caller that reads the frame out of RDRAM rather than looking at a screen.
++        bool renderOnlyToRAM = false;
+     };
+ 
+     struct Application : public ApplicationWindow::Listener {
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -818,7 +818,8 @@ namespace RT64 {
+ 
+         // Validate all tile copies to be used during the rendering.
+         const bool extendedRenderToRAMSet = (extended.renderToRAM < UINT8_MAX);
+-        const bool renderToRDRAM = extendedRenderToRAMSet ? (extended.renderToRAM != 0) : ext.emulatorConfig->framebuffer.renderToRAM;
++        const bool renderOnlyToRAM = ext.app->appConfig.renderOnlyToRAM;
++        const bool renderToRDRAM = renderOnlyToRAM || (extendedRenderToRAMSet ? (extended.renderToRAM != 0) : ext.emulatorConfig->framebuffer.renderToRAM);
+         const bool warningsEnabled = ext.userConfig->developerMode;
+         const bool linearFiltering = !ext.userConfig->threePointFiltering;
+         const size_t callTileCount = workload.drawData.callTiles.size();
+@@ -1775,15 +1776,19 @@ namespace RT64 {
+         }
+         
+         // Advance the workload queue at the end of a full synchronization.
++        // Rendering only to RAM, the frame is already where it is going: the workload is not handed
++        // to the render thread, and the same one is reset and filled again by the next display list.
+         advanceWorkload(workload, false);
+-        ext.workloadQueue->advanceToNextWorkload();
++        if (!renderOnlyToRAM) {
++            ext.workloadQueue->advanceToNextWorkload();
++        }
+ 
+         // Make sure the profiler starts after the workload is advanced to ignore any waiting time.
+         dlCpuProfiler.reset();
+         dlCpuProfiler.start();
+-        
++
+         // Submit a presentation event instantly if applicable.
+-        const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
++        const bool presentEarly = !renderOnlyToRAM && !ext.presentQueue->viewRDRAM &&(ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
+         if (presentEarly && (workload.fbPairCount > 0)) {
+             thread_local std::unordered_set<uint32_t> colorImageAddressSet;
+             colorImageAddressSet.clear();
+@@ -1836,6 +1841,11 @@ namespace RT64 {
+     }
+     
+     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
++        // Nothing is presented when rendering only to RAM.
++        if (ext.app->appConfig.renderOnlyToRAM) {
++            return;
++        }
++
+         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
+         if (debuggerInspector.paused && !fromEarlyPresent) {
+             if (ext.userConfig->developerMode) {

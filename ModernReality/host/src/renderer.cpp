@@ -189,6 +189,9 @@ public:
         app_config.dataPath = rt64_data_path();
         app_config.detectDataPath = false;
         app_config.useConfigurationFile = true;
+        // A game with nobody watching is only here for its picture, which the
+        // gym reads out of the console's memory; see take_picture in gym.cpp.
+        app_config.renderOnlyToRAM = gym_headless();
 
         app_ = std::make_unique<RT64::Application>(core, app_config);
         app_->userConfig.developerMode = developer_mode;
@@ -250,6 +253,13 @@ public:
         // Everything in a task is a KSEG0 address; RT64 indexes RDRAM
         // directly, so the segment bits come off.
         constexpr uint32_t physical = 0x03FFFFFFu;
+        // A frame a driven game is stepping past and nobody will see: counted,
+        // so the step is still that many frames of the game, and not drawn.
+        if (gym_skip_drawing()) {
+            frames_++;
+            drawn_frames.store(frames_, std::memory_order_relaxed);
+            return;
+        }
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(uint32_t(task->t.ucode) & physical,
                                         uint32_t(task->t.ucode_data) & physical, true);

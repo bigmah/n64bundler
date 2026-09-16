@@ -44,13 +44,14 @@ struct Options {
     std::string unpack;
     std::string gym;
     bool headless = false;
+    bool picture = false;
 };
 
 void usage() {
     std::fprintf(stderr,
                  "usage: n64b-run --module <game.dylib> --rom <game.z64>\n"
                  "                [--config-dir <dir>] [--fullscreen] [--developer]\n"
-                 "                [--unpack <image.bin>] [--gym <name>] [--headless]\n"
+                 "                [--unpack <image.bin>] [--gym <name>] [--headless] [--picture]\n"
                  "\n"
                  "  --unpack  run until the game jumps to code that was not recompiled,\n"
                  "            then write the console's memory to <image.bin> and stop.\n"
@@ -66,7 +67,11 @@ void usage() {
                  "            on file descriptor 3.\n"
                  "  --headless  no window and no renderer: the game still builds its\n"
                  "            display lists, and they are counted and dropped. Only useful\n"
-                 "            with --gym, and several times faster than drawing them.\n");
+                 "            with --gym, and several times faster than drawing them.\n"
+                 "  --picture  hand the caller every frame as a picture, in the shared block\n"
+                 "            beside the console's memory. With --headless the renderer draws\n"
+                 "            only into the console's memory, at its own resolution, and\n"
+                 "            nothing is shown. Only useful with --gym.\n");
 }
 
 fs::path default_config_dir() {
@@ -385,6 +390,7 @@ int main(int argc, char **argv) {
         else if (arg == "--unpack") options.unpack = next_arg();
         else if (arg == "--gym") options.gym = next_arg();
         else if (arg == "--headless") options.headless = true;
+        else if (arg == "--picture") options.picture = true;
         else if (arg == "--help" || arg == "-h") { usage(); return 0; }
         else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
@@ -412,15 +418,15 @@ int main(int argc, char **argv) {
     // because it decides whether there is a window, a renderer, sound, and a
     // clock -- and because getting it wrong is a game nobody is holding.
     if (!options.gym.empty()) {
-        if (!n64b::gym_open(options.gym, options.headless, error)) {
+        if (!n64b::gym_open(options.gym, options.headless, options.picture, error)) {
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
         }
         // The retrace stops being a clock and becomes something the caller asks
         // for. Everything else about the console is unchanged.
         ultramodern::set_host_paced_retraces(true);
-    } else if (options.headless) {
-        std::fprintf(stderr, "error: --headless is for a game being driven; pass --gym too.\n");
+    } else if (options.headless || options.picture) {
+        std::fprintf(stderr, "error: --headless and --picture are for a game being driven; pass --gym too.\n");
         return 2;
     }
 
@@ -444,16 +450,23 @@ int main(int argc, char **argv) {
     // Headless there is neither, and the handle is only a pair of pointers the
     // renderer never looks at -- but it has to be something, because the
     // runtime reads an empty one as "ask the frontend to make a window".
+    //
+    // Headless with a picture there is a renderer and a window nobody sees:
+    // RT64 sets up its device on a window's layer whether or not it ever
+    // presents to it, and drawing only into the console's memory it never does.
     ultramodern::renderer::WindowHandle window_handle{};
-    if (n64b::gym_headless()) {
+    if (n64b::gym_headless() && !n64b::gym_picture()) {
         window_handle.window = reinterpret_cast<void *>(1);
         window_handle.view = reinterpret_cast<void *>(1);
     } else {
-        if (!n64b::open_window(desc.display_name, options.fullscreen, window_handle, error)) {
+        if (!n64b::open_window(desc.display_name, options.fullscreen, n64b::gym_headless(), window_handle,
+                               error)) {
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
         }
-        n64b::init_input();
+        if (!n64b::gym_headless()) {
+            n64b::init_input();
+        }
     }
     n64b::install_trace(options.developer);
     // Zero unless this game reaches between its overlays through the CPU's
@@ -547,6 +560,12 @@ int main(int argc, char **argv) {
     graphics.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Auto;
     graphics.rr_manual_value = 60;
     graphics.ds_option = 1;
+    // Drawing only into the console's memory, the console's own resolution is
+    // the only one there is, and nothing is sampled more than once a pixel.
+    if (n64b::gym_headless()) {
+        graphics.res_option = ultramodern::renderer::Resolution::Original;
+        graphics.msaa_option = ultramodern::renderer::Antialiasing::None;
+    }
     ultramodern::renderer::set_graphics_config(graphics);
 
     // How fast the console's processor was.
@@ -618,8 +637,9 @@ int main(int argc, char **argv) {
     config.project_version = recomp::Version{1, 0, 0};
     config.window_handle = window_handle;
     config.rsp_callbacks = recomp::rsp::callbacks_t{.get_rsp_microcode = select_microcode};
-    config.renderer_callbacks = n64b::gym_headless() ? n64b::headless_renderer_callbacks()
-                                                     : n64b::renderer_callbacks();
+    config.renderer_callbacks = (n64b::gym_headless() && !n64b::gym_picture())
+                                    ? n64b::headless_renderer_callbacks()
+                                    : n64b::renderer_callbacks();
     config.audio_callbacks = n64b::audio_callbacks();
     config.input_callbacks = n64b::input_callbacks();
     config.events_callbacks = n64b::events_callbacks();
@@ -630,8 +650,10 @@ int main(int argc, char **argv) {
         .create_window = nullptr,
         // Called on the main thread on every turn of librecomp's own loop,
         // which is the only place AppKit will let events be read. There is no
-        // window to read events from when the game is headless.
-        .update_gfx = n64b::gym_headless()
+        // window to read events from when the game is headless. A hidden one
+        // for a picture still needs it: pumping is what runs the main queue,
+        // and the renderer sets up its layer through that queue.
+        .update_gfx = (n64b::gym_headless() && !n64b::gym_picture())
                           ? nullptr
                           : +[](ultramodern::gfx_callbacks_t::gfx_data_t) { n64b::pump_window(); },
     };

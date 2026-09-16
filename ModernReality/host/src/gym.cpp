@@ -32,9 +32,12 @@
 
 #include "host.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -76,9 +79,21 @@ constexpr uint32_t kMaxRetracesPerFrame = 900;
 struct Gym {
     bool active = false;
     bool headless = false;
+    bool picture = false;
     int shared_fd = -1;
     int socket_fd = -1;
     n64b_gym_block *block = nullptr;
+    /// Where the picture goes, with `--picture`: the room after the console's
+    /// memory in the shared object.
+    uint8_t *pixels = nullptr;
+    /// Whether the framebuffers hold what the game has drawn since the last
+    /// load or the last step that drew nothing. Only the control thread reads
+    /// and writes it.
+    bool picture_current = true;
+    /// Whether the frame being advanced is one to count and not draw. Written
+    /// by the control thread before the retraces for that frame, read by the
+    /// renderer on the graphics thread.
+    std::atomic<bool> skip_drawing{false};
     /// The console's memory, once the game has been given some. Set from
     /// `map_memory` on the game's own thread, read by the control thread.
     std::atomic<uint8_t *> rdram{nullptr};
@@ -502,7 +517,10 @@ bool one_retrace() {
 /// that misses its target spends three, and nothing here has to know that.
 uint32_t advance(uint32_t frames, uint32_t *retraces_taken) {
     *retraces_taken = 0;
+    const uint32_t draw = (gym.headless && gym.picture) ? gym.block->draw : N64B_GYM_DRAW_EVERY_FRAME;
     for (uint32_t frame = 0; frame < frames; frame++) {
+        gym.skip_drawing.store(draw == N64B_GYM_DRAW_NOTHING ||
+                               (draw == N64B_GYM_DRAW_LAST_FRAME && frame + 1 < frames));
         const uint64_t target = drawn_frames.load() + 1;
         uint32_t spent = 0;
         while (drawn_frames.load() < target) {
@@ -544,6 +562,98 @@ bool boot_until_quiet() {
     return false;
 }
 
+// --- the picture ---------------------------------------------------------------
+
+/// Put the frame the video interface will show next where the caller can see it.
+///
+/// The frame is already in the console's memory. With `--picture` RT64 renders
+/// every display list back into the framebuffer the game drew it into, at the
+/// console's own resolution, which is what the RDP did on the console -- so
+/// this is not a screenshot of a renderer but the console's picture, read the
+/// way its video interface read it. Nothing here knows which game it is.
+///
+/// It is the *next* frame's registers, not the ones scanning out now: the game
+/// hands the interface a finished frame and then waits for the retrace that
+/// shows it, and that wait is where the console is quiet. The registers of the
+/// retrace before are a frame behind what the game has already drawn.
+///
+/// The gamma goes on here as it does for a screenshot (see write_screenshot in
+/// renderer.cpp), so the picture is as bright as the window.
+void take_picture() {
+    n64b_gym_block *block = gym.block;
+    block->picture_width = 0;
+    block->picture_height = 0;
+    const uint8_t *rdram = gym.rdram.load();
+    ultramodern::renderer::ViRegs vi{};
+    if (!gym.picture || gym.pixels == nullptr || rdram == nullptr || !gym.picture_current ||
+        !ultramodern::next_vi_regs(&vi)) {
+        return;
+    }
+    // Blanked, or never configured: no picture, rather than a picture of nothing.
+    const unsigned depth = vi.VI_STATUS_REG & 3u;
+    if ((depth != 2 && depth != 3) || vi.VI_H_START_REG == 0) {
+        return;
+    }
+    // A row of the framebuffer is `width` pixels. The interface shows half as
+    // many lines as its vertical window counts half-lines, and steps through
+    // the framebuffer `yScale` rows (in 2.10) for each.
+    const unsigned width = std::min(vi.VI_WIDTH_REG & 0xFFFu, N64B_GYM_PICTURE_MAX_WIDTH);
+    const unsigned start = (vi.VI_V_START_REG >> 16) & 0x3FFu;
+    const unsigned end = vi.VI_V_START_REG & 0x3FFu;
+    const unsigned y_scale = vi.VI_Y_SCALE_REG & 0xFFFu;
+    const unsigned lines = end > start ? (end - start) / 2u : 0u;
+    unsigned height = std::min((lines * (y_scale != 0 ? y_scale : 0x400u)) / 0x400u, N64B_GYM_PICTURE_MAX_HEIGHT);
+    const unsigned origin = vi.VI_ORIGIN_REG & 0x00FFFFFFu;
+    const unsigned bytes_per_pixel = depth == 2 ? 2u : 4u;
+    const unsigned stride = (vi.VI_WIDTH_REG & 0xFFFu) * bytes_per_pixel;
+    if (width == 0 || height == 0 || origin + 4u > N64B_GYM_RDRAM_BYTES) {
+        return;
+    }
+    height = std::min(height, (N64B_GYM_RDRAM_BYTES - origin - 4u) / stride);
+
+    static const std::array<uint8_t, 256> gamma = [] {
+        std::array<uint8_t, 256> table{};
+        for (int i = 0; i < 256; i++) {
+            table[i] = uint8_t(std::lround(255.0 * std::pow(i / 255.0, 1.0 / 2.2)));
+        }
+        return table;
+    }();
+    const bool gamma_on = (vi.VI_STATUS_REG & 0x8u) != 0;
+
+    uint8_t *out = gym.pixels;
+    for (unsigned y = 0; y < height; y++) {
+        const unsigned row = origin + y * stride;
+        for (unsigned x = 0; x < width; x++) {
+            unsigned r, g, b;
+            if (depth == 2) {
+                // Five bits each and one of coverage. A word holds two pixels,
+                // and a word is native here.
+                const unsigned at = row + x * 2u;
+                uint32_t word;
+                std::memcpy(&word, rdram + (at & ~3u), sizeof(word));
+                const unsigned pixel = (at & 2u) ? (word & 0xFFFFu) : (word >> 16);
+                r = ((pixel >> 11) & 31u) * 255u / 31u;
+                g = ((pixel >> 6) & 31u) * 255u / 31u;
+                b = ((pixel >> 1) & 31u) * 255u / 31u;
+            } else {
+                uint32_t word;
+                std::memcpy(&word, rdram + row + x * 4u, sizeof(word));
+                r = (word >> 24) & 0xFFu;
+                g = (word >> 16) & 0xFFu;
+                b = (word >> 8) & 0xFFu;
+            }
+            out[0] = gamma_on ? gamma[r] : uint8_t(r);
+            out[1] = gamma_on ? gamma[g] : uint8_t(g);
+            out[2] = gamma_on ? gamma[b] : uint8_t(b);
+            out[3] = 255;
+            out += 4;
+        }
+    }
+    block->picture_width = width;
+    block->picture_height = height;
+    block->picture_frame = drawn_frames.load();
+}
+
 void say(uint32_t status, const std::string &message) {
     gym.block->status = status;
     std::snprintf(gym.block->message, sizeof(gym.block->message), "%s", message.c_str());
@@ -568,6 +678,7 @@ void control_thread() {
     }
 
     // The doorbell, rung once to say the game is up and waiting.
+    take_picture();
     gym.block->frames = drawn_frames.load();
     gym.block->retraces = retraces_given.load();
     say(N64B_GYM_OK, "ready");
@@ -593,10 +704,13 @@ void control_thread() {
             case N64B_GYM_STEP: {
                 uint32_t retraces_taken = 0;
                 const uint32_t status = advance(count == 0 ? 1 : count, &retraces_taken);
+                gym.skip_drawing.store(false);
                 gym.block->retraces_taken = retraces_taken;
                 if (status != N64B_GYM_OK) {
                     say(status, "the game stopped answering the video interface");
                 }
+                gym.picture_current = status == N64B_GYM_OK &&
+                                      !(gym.headless && gym.block->draw == N64B_GYM_DRAW_NOTHING);
                 break;
             }
             case N64B_GYM_SAVE_STATE: {
@@ -611,6 +725,7 @@ void control_thread() {
                 if (!load_state(gym.block->path, error)) {
                     say(N64B_GYM_REFUSED, error);
                 }
+                gym.picture_current = false;
                 break;
             }
             case N64B_GYM_QUIT:
@@ -625,6 +740,7 @@ void control_thread() {
                 break;
         }
 
+        take_picture();
         gym.block->frames = drawn_frames.load();
         gym.block->retraces = retraces_given.load();
         if (!write_all(gym.socket_fd, &doorbell, 1)) {
@@ -636,7 +752,7 @@ void control_thread() {
 
 } // namespace
 
-bool gym_open(const std::string &name, bool headless, std::string &error) {
+bool gym_open(const std::string &name, bool headless, bool picture, std::string &error) {
     gym.shared_fd = ::shm_open(name.c_str(), O_RDWR, 0600);
     if (gym.shared_fd < 0) {
         error = "could not open the shared block " + name + ": " + std::strerror(errno);
@@ -655,6 +771,18 @@ bool gym_open(const std::string &name, bool headless, std::string &error) {
     }
     gym.block->rdram_offset = N64B_GYM_RDRAM_OFFSET;
     gym.block->rdram_bytes = N64B_GYM_RDRAM_BYTES;
+    gym.block->picture_width = 0;
+    gym.block->picture_height = 0;
+
+    if (picture) {
+        void *pixels = ::mmap(nullptr, N64B_GYM_PICTURE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED,
+                              gym.shared_fd, N64B_GYM_PICTURE_OFFSET);
+        if (pixels == MAP_FAILED) {
+            error = std::string("could not map the picture: ") + std::strerror(errno);
+            return false;
+        }
+        gym.pixels = static_cast<uint8_t *>(pixels);
+    }
 
     gym.socket_fd = N64B_GYM_SOCKET_FD;
     // The caller is meant to have handed us one end of a socket. Saying so here
@@ -669,6 +797,7 @@ bool gym_open(const std::string &name, bool headless, std::string &error) {
 
     gym.name = name;
     gym.headless = headless;
+    gym.picture = picture;
     gym.active = true;
     return true;
 }
@@ -676,6 +805,10 @@ bool gym_open(const std::string &name, bool headless, std::string &error) {
 bool gym_running() { return gym.active; }
 
 bool gym_headless() { return gym.active && gym.headless; }
+
+bool gym_picture() { return gym.active && gym.picture; }
+
+bool gym_skip_drawing() { return gym.skip_drawing.load(std::memory_order_relaxed); }
 
 ultramodern::renderer::callbacks_t headless_renderer_callbacks() {
     return ultramodern::renderer::callbacks_t{

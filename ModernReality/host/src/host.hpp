@@ -44,8 +44,9 @@ int save_type_of(const n64b_module_v1 &desc);
 // --- the window ------------------------------------------------------------
 
 /// Open the game window. Must be called on the main thread, before anything
-/// else touches SDL.
-bool open_window(const std::string &title, bool fullscreen,
+/// else touches SDL. A hidden one is never shown: it is only somewhere for the
+/// renderer to set up on, for a game whose frames go into its memory instead.
+bool open_window(const std::string &title, bool fullscreen, bool hidden,
                  ultramodern::renderer::WindowHandle &out, std::string &error);
 
 /// Pump the event queue. Called from the main thread on every iteration of
@@ -133,9 +134,15 @@ void init_input();
 
 /// Attach to the shared block and the control socket. False with `error` set if
 /// either is not there, which is a game started as a gym by nobody.
-bool gym_open(const std::string &name, bool headless, std::string &error);
+bool gym_open(const std::string &name, bool headless, bool picture, std::string &error);
 bool gym_running();
 bool gym_headless();
+/// Whether the caller wants each frame as a picture, which means a renderer
+/// drawing into the console's memory even when nothing is on a screen.
+bool gym_picture();
+/// Whether the frame the game is on now is one to count and not draw; see
+/// `n64b_gym_draw` in gym.h.
+bool gym_skip_drawing();
 
 /// Map the console's memory into the shared block, before anything aliases it.
 void gym_map_memory(uint8_t *rdram);

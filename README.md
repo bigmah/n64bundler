@@ -401,6 +401,18 @@ and not ours to skip; what goes away is drawing them, which is most of the
 time. Super Mario 64 runs at about **5000 frames a second** that way, against
 the 30 a console manages, and eight copies at once on one laptop reach 18 000.
 
+`--picture` hands over what the game looks like, which is the one thing about a
+game a caller can use without knowing anything about the game. After every step
+the frame the video interface will show next is in the shared block, beside the
+memory, as 8-bit RGBA. It is not a screenshot of the renderer. RT64 renders each
+frame back into the framebuffer the game drew it into, at the console's own
+resolution, as the RDP did, and the picture is read out of that the way the
+video interface read it: its origin, width, pixel format and gamma. With
+`--headless` RT64 renders only that — no upscaled frame, nothing presented, on a
+window that is never shown (patch 0023) — and can skip the frames of a step
+nobody will see (`draw` in `gym.h`). Eight copies of Super Mario 64 then step
+about 2500 times a second at two frames a step, with a picture on every step.
+
 And a game can be put down and picked up again. A savestate here is the
 console's memory plus the registers of every thread, taken while the game is
 quiet and put back into a game that is quiet in the same shape — which is

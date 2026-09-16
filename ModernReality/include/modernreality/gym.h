@@ -18,6 +18,11 @@
  * code is running on, with no copying and no protocol for it. It is only safe
  * to read between frames, which is exactly when the caller is awake.
  *
+ * So is the picture, for a game started with `--picture`: after every command,
+ * the frame the video interface will show next, as 8-bit RGBA at
+ * `N64B_GYM_PICTURE_OFFSET`. That is what the game looks like without knowing
+ * anything about the game, which is the point of it.
+ *
  * Everything else is this block, plus one byte each way over the socket on
  * `N64B_GYM_SOCKET_FD`: the caller fills in a command and writes a byte, the
  * game carries it out and writes a byte back. The byte is a doorbell rather
@@ -30,19 +35,30 @@
 #include <stdint.h>
 
 #define N64B_GYM_MAGIC 0x4E36474Du /* "N6GM" */
-#define N64B_GYM_ABI 1u
+/* 2 added the picture. */
+#define N64B_GYM_ABI 2u
 
 /* The descriptor the host expects its end of the control socket on. A spawned
  * game gets this from whoever spawned it; there is nothing to negotiate. */
 #define N64B_GYM_SOCKET_FD 3
 
-/* The shared object: a page of control block, and then the console's memory.
- * The offset is a whole number of pages on every machine this runs on, because
- * the game's memory is mapped over the runtime's own allocation at that offset
- * and a mapping has to start on a page. */
+/* The shared object: a page of control block, the console's memory, and room
+ * for the picture. The offsets are whole numbers of pages on every machine this
+ * runs on, because the game's memory is mapped over the runtime's own
+ * allocation at that offset and a mapping has to start on a page. */
 #define N64B_GYM_RDRAM_OFFSET 0x10000u
 #define N64B_GYM_RDRAM_BYTES (8u * 1024u * 1024u)
-#define N64B_GYM_SHM_BYTES (N64B_GYM_RDRAM_OFFSET + N64B_GYM_RDRAM_BYTES)
+
+/* The picture: rows top to bottom, four bytes a pixel, red first and alpha
+ * always 255, `picture_width` by `picture_height` of it in use. The room is
+ * for the largest frame a console scans out, 640 by 480; most games draw 320
+ * by 240. */
+#define N64B_GYM_PICTURE_OFFSET (N64B_GYM_RDRAM_OFFSET + N64B_GYM_RDRAM_BYTES)
+#define N64B_GYM_PICTURE_MAX_WIDTH 640u
+#define N64B_GYM_PICTURE_MAX_HEIGHT 480u
+#define N64B_GYM_PICTURE_BYTES (N64B_GYM_PICTURE_MAX_WIDTH * N64B_GYM_PICTURE_MAX_HEIGHT * 4u)
+
+#define N64B_GYM_SHM_BYTES (N64B_GYM_PICTURE_OFFSET + N64B_GYM_PICTURE_BYTES)
 
 /* Where the console's memory starts, as the game addresses it. A caller reading
  * the game's variables has an address out of a decompilation or an analysis and
@@ -74,6 +90,21 @@ enum n64b_gym_status {
     N64B_GYM_REFUSED = 2,
 };
 
+/* Which frames of a step a headless game with a picture draws. A frame not
+ * drawn is still a frame of the game -- its display list is handed over and
+ * counted -- and nothing is rendered for it.
+ *
+ * Drawing only the last frame is nearly twice as fast at two frames a step,
+ * and drawing nothing is for getting somewhere, such as replaying inputs
+ * after a load, with no picture wanted until it ends. Both are wrong for a
+ * game that builds a frame out of the one before it, so they are the
+ * caller's to ask for. A step that draws nothing has no picture. */
+enum n64b_gym_draw {
+    N64B_GYM_DRAW_EVERY_FRAME = 0,
+    N64B_GYM_DRAW_LAST_FRAME = 1,
+    N64B_GYM_DRAW_NOTHING = 2,
+};
+
 /* One controller. The buttons are libultra's own bits -- A is 0x8000, B 0x4000,
  * Z 0x2000, Start 0x1000 -- and the stick is the fraction of full deflection
  * the host's own controller callback reports, so -1 to 1 in each axis. */
@@ -95,6 +126,9 @@ struct n64b_gym_block {
     uint32_t count;
     struct n64b_gym_pad pad[4];
     char path[512];
+    /* With `--headless --picture`, which of the frames a step advances are
+     * drawn: see `n64b_gym_draw`. */
+    uint32_t draw;
 
     /* What happened. */
     uint32_t status;
@@ -107,6 +141,17 @@ struct n64b_gym_block {
     uint64_t frames;
     uint64_t retraces;
     char message[256];
+
+    /* The picture, with `--picture`: how much of the room it fills, and the
+     * frame count it was taken at. A width of zero is no picture, which is
+     * what a game without `--picture` always says, what one says while its
+     * video interface is blanked or has not been set up, and what one says
+     * after a load or a step that drew nothing, until it draws a frame: a
+     * state holds framebuffers in whatever condition the game that saved it
+     * left them. */
+    uint32_t picture_width;
+    uint32_t picture_height;
+    uint64_t picture_frame;
 };
 
 #endif

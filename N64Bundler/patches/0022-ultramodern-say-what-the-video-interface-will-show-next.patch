@@ -1,0 +1,106 @@
+ultramodern: say what the video interface will show next
+
+A caller driving a game wants the frame the game has just finished, and the
+registers a screen update carries are not it. A retrace posts the registers it
+is about to replace and then swaps: the frame on them is the one the interface
+was already showing, and the game's newest frame -- handed over with
+osViSwapBuffer and waiting for the retrace that shows it -- is one behind. For a
+game that has gone quiet between frames, which is exactly when a gym reads it,
+that is always one frame of lag.
+
+`update_vi` already works the right registers out of the next VI state before it
+swaps. That part is now `next_regs`, and `next_vi_regs` returns what it makes
+without swapping anything: the origin, width, vertical window, scale and status
+the next retrace will scan out with. `update_vi` does exactly what it did.
+
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -223,6 +223,12 @@
+ 
+ void save_vi(RDRAM_ARG ViSnapshot* out);
+ void load_vi(RDRAM_ARG const ViSnapshot* in);
++
++/// The registers the video interface will scan out with at the next retrace,
++/// which is the frame the game most recently handed it. The registers a screen
++/// update carries are the ones before that retrace, so they are a frame behind.
++/// False before the game has set a mode.
++bool next_vi_regs(ultramodern::renderer::ViRegs* out);
+ 
+ /// Hold the recompiled code to the rate the console's processor managed.
+ ///
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -70,11 +70,21 @@
+             return &states[cur_state];
+         }
+         void update_vi() {
++            // Skip the update if the next mode hasn't been set yet.
++            if (!next_regs(regs)) {
++                return;
++            }
++
++            // Swap VI states.
++            cur_state ^= 1;
++            *get_next_state() = *get_cur_state();
++        }
++        /// The registers the next retrace will scan out with, without scanning out.
++        bool next_regs(ultramodern::renderer::ViRegs& out) {
+             ViState* next_state = get_next_state();
+             const OSViMode* next_mode = next_state->mode;
+             if (next_mode == nullptr) {
+-                // Skip the update if the next mode hasn't been set yet.
+-                return;
++                return false;
+             }
+ 
+             const OSViCommonRegs* common_regs = &next_mode->comRegs;
+@@ -97,23 +107,20 @@
+             // TODO implement osViFade
+ 
+             // Update VI registers.
+-            regs.VI_ORIGIN_REG = origin;
+-            regs.VI_WIDTH_REG = common_regs->width;
+-            regs.VI_TIMING_REG = common_regs->burst;
+-            regs.VI_V_SYNC_REG = common_regs->vSync;
+-            regs.VI_H_SYNC_REG = common_regs->hSync;
+-            regs.VI_LEAP_REG = common_regs->leap;
+-            regs.VI_H_START_REG = hStart;
+-            regs.VI_V_START_REG = field_regs->vStart; // TODO implement osViExtendVStart
+-            regs.VI_V_BURST_REG = field_regs->vBurst;
+-            regs.VI_INTR_REG = field_regs->vIntr;
+-            regs.VI_X_SCALE_REG = common_regs->xScale; // TODO implement osViSetXScale
+-            regs.VI_Y_SCALE_REG = yScale; // TODO implement osViSetYScale
+-            regs.VI_STATUS_REG = next_state->control;
+-            
+-            // Swap VI states.
+-            cur_state ^= 1;
+-            *get_next_state() = *get_cur_state();
++            out.VI_ORIGIN_REG = origin;
++            out.VI_WIDTH_REG = common_regs->width;
++            out.VI_TIMING_REG = common_regs->burst;
++            out.VI_V_SYNC_REG = common_regs->vSync;
++            out.VI_H_SYNC_REG = common_regs->hSync;
++            out.VI_LEAP_REG = common_regs->leap;
++            out.VI_H_START_REG = hStart;
++            out.VI_V_START_REG = field_regs->vStart; // TODO implement osViExtendVStart
++            out.VI_V_BURST_REG = field_regs->vBurst;
++            out.VI_INTR_REG = field_regs->vIntr;
++            out.VI_X_SCALE_REG = common_regs->xScale; // TODO implement osViSetXScale
++            out.VI_Y_SCALE_REG = yScale; // TODO implement osViSetYScale
++            out.VI_STATUS_REG = next_state->control;
++            return true;
+         }
+     } vi;
+     struct {
+@@ -297,6 +304,11 @@
+     remaining_retraces = in->remaining_retraces;
+ }
+ 
++bool ultramodern::next_vi_regs(ultramodern::renderer::ViRegs* out) {
++    std::lock_guard lock{ events_context.message_mutex };
++    return events_context.vi.next_regs(*out);
++}
++
+ void vi_thread_func() {
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows

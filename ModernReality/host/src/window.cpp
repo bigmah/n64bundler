@@ -130,7 +130,7 @@ bool capture_window(const char *path) {
     return true;
 }
 
-bool open_window(const std::string &title, bool fullscreen,
+bool open_window(const std::string &title, bool fullscreen, bool hidden,
                  ultramodern::renderer::WindowHandle &out, std::string &error) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         error = std::string("SDL could not start: ") + SDL_GetError();
@@ -138,7 +138,9 @@ bool open_window(const std::string &title, bool fullscreen,
     }
 
     uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_METAL;
-    if (fullscreen) {
+    if (hidden) {
+        flags |= SDL_WINDOW_HIDDEN;
+    } else if (fullscreen) {
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
         fullscreen_now = true;
     }

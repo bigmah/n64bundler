@@ -6,10 +6,13 @@
 #   ./build.sh --rebuild    force a full rebuild first
 #   ./build.sh --no-install leave N64Bundler.app here instead of installing it
 #   ./build.sh --tools-only stop after the analyser and the recompiler
+#   ./build.sh --no-window  stop after the host, leaving out the window and the app
 #
 # --tools-only skips RT64, which is most of the build, and is what to use while
-# only the analyser is being worked on. See PLAN.md for what is done and what
-# is not.
+# only the analyser is being worked on. --no-window is everything a program that
+# recompiles and drives games itself needs (n64rip, n64b-port, n64b-run --gym),
+# and nothing that is only for playing them from the library. See PLAN.md for
+# what is done and what is not.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,11 +25,13 @@ INSTALL_DIR="$HOME/Applications"
 REBUILD=0
 INSTALL=1
 TOOLS_ONLY=0
+NO_WINDOW=0
 for arg in "$@"; do
   case "$arg" in
     --rebuild) REBUILD=1 ;;
     --no-install) INSTALL=0 ;;
     --tools-only) TOOLS_ONLY=1 ;;
+    --no-window) NO_WINDOW=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -37,7 +42,7 @@ step() { printf '\n%s==> %s%s\n' "$bold" "$*" "$off"; }
 for tool in cmake ninja git python3; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
-if [ "$TOOLS_ONLY" -eq 0 ]; then
+if [ "$TOOLS_ONLY" -eq 0 ] && [ "$NO_WINDOW" -eq 0 ]; then
   command -v cargo >/dev/null || { echo "cargo is required to build the window; install Rust or pass --tools-only" >&2; exit 1; }
 fi
 
@@ -230,7 +235,8 @@ else
   echo "    no libultra archive given, so nothing in a ROM can be named."
   echo "    A ROM still recompiles: every libultra function that drives hardware is"
   echo "    stubbed instead of being replaced by the runtime's own, which is enough to"
-  echo "    build and not enough to play."
+  echo "    build and not enough to play -- unless the game's title record names its"
+  echo "    libultra itself, as Super Mario 64's does."
   echo "    Set N64_LIBULTRA to the libultra*.a from a decompilation project:"
   echo "      N64_LIBULTRA=\"/path/to/lib/n64/libultra*.a\" ./N64Bundler/build.sh"
 fi
@@ -250,6 +256,14 @@ step "Building the host"
 echo "    RT64 is a few hundred source files; the first build takes a while."
 cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" --target n64b-run
 [ -x "$MR_BUILD/host/n64b-run" ] || { echo "expected $MR_BUILD/host/n64b-run to exist" >&2; exit 1; }
+
+if [ "$NO_WINDOW" -eq 1 ]; then
+  printf '\n%sTools and host built.%s Recompile a ROM with:\n' "$bold" "$off"
+  printf '  %s analyze <rom.z64> --out-dir <dir> --runtime-provides %s --titles %s\n' \
+    "$MR_BUILD/n64rip" "$PROVIDES" "$HERE/titles"
+  printf '  %s build --analysis <dir> --rom <rom.z64> --out <game.dylib>\n' "$MR_BUILD/n64b-port"
+  exit 0
+fi
 
 step "Building the window"
 ( cd "$HERE/gui" && cargo build --release )

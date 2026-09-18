@@ -275,3 +275,145 @@ rom  = 0x0E7740
 size = 0xE20
 data_rom  = 0x0F52C0
 data_size = 0x2C0
+
+# The rest of its libultra: threads, message queues, caches, the TLB, the
+# clock, the rest of the task interface, and the compiler's 64-bit helpers.
+#
+# These are what a signature database names, and a database is built from the
+# SDK's own libultra archives, which nothing here ships (see N64_LIBULTRA in
+# build.sh). Without one, twenty of these are stubbed and the game never gets
+# past boot -- so they are written down, and a bare cartridge dump recompiles
+# the way it does with the database. Each address is where the database built
+# from the SDK matched that function in this cartridge; the analysis with them
+# and no database is identical to the analysis with the database and without
+# them, down to every boundary and every stub.
+#
+# Two are the same short routine at two addresses, and the database could not
+# tell __ull_rem from __ll_rem at either; it chose __ull_rem, and so does this.
+[[function]]
+vram = 0x803223B0
+name = "osSetTime"
+[[function]]
+vram = 0x803223E0
+name = "osMapTLB"
+[[function]]
+vram = 0x803225A0
+name = "osCreateMesgQueue"
+[[function]]
+vram = 0x803226B0
+name = "osCreateThread"
+[[function]]
+vram = 0x80322800
+name = "osRecvMesg"
+[[function]]
+vram = 0x80322BBC
+name = "osSpTaskStartGo"
+[[function]]
+vram = 0x80322C00
+name = "osSpTaskYield"
+[[function]]
+vram = 0x80322C20
+name = "osSendMesg"
+[[function]]
+vram = 0x80322DF0
+name = "osStartThread"
+[[function]]
+vram = 0x80322F40
+name = "osWritebackDCacheAll"
+[[function]]
+vram = 0x803236F0
+name = "osSetThreadPri"
+[[function]]
+vram = 0x803240F0
+name = "__ull_rshift"
+[[function]]
+vram = 0x8032411C
+name = "__ull_rem"
+[[function]]
+vram = 0x80324158
+name = "__ull_div"
+[[function]]
+vram = 0x80324194
+name = "__ll_lshift"
+[[function]]
+vram = 0x803241C0
+name = "__ull_rem"
+[[function]]
+vram = 0x803241FC
+name = "__ll_div"
+[[function]]
+vram = 0x80324258
+name = "__ll_mul"
+[[function]]
+vram = 0x803242E8
+name = "__ll_mod"
+[[function]]
+vram = 0x80324384
+name = "__ll_rshift"
+[[function]]
+vram = 0x803243B0
+name = "osInvalDCache"
+[[function]]
+vram = 0x80324610
+name = "osInvalICache"
+[[function]]
+vram = 0x80325070
+name = "osGetTime"
+[[function]]
+vram = 0x80325100
+name = "__d_to_ll"
+[[function]]
+vram = 0x8032511C
+name = "__f_to_ll"
+[[function]]
+vram = 0x80325138
+name = "__d_to_ull"
+[[function]]
+vram = 0x803251D8
+name = "__f_to_ull"
+[[function]]
+vram = 0x80325274
+name = "__ll_to_d"
+[[function]]
+vram = 0x8032528C
+name = "__ll_to_f"
+[[function]]
+vram = 0x803252A4
+name = "__ull_to_d"
+[[function]]
+vram = 0x803252D8
+name = "__ull_to_f"
+[[function]]
+vram = 0x80325D20
+name = "osWritebackDCache"
+[[function]]
+vram = 0x80325DA0
+name = "osAiGetLength"
+[[function]]
+vram = 0x803274F0
+name = "__osRestoreInt"
+[[function]]
+vram = 0x80327EB0
+name = "osVirtualToPhysical"
+[[function]]
+vram = 0x80328050
+name = "osGetThreadPri"
+[[function]]
+vram = 0x803283E0
+name = "osGetCount"
+[[function]]
+vram = 0x80328FD0
+name = "osJamMesg"
+[[function]]
+vram = 0x8032AF70
+name = "__osProbeTLB"
+
+# Two more boundaries the database finds and the walk does not: libultra
+# routines the runtime has no implementation of, so the database hands them
+# back to be recompiled like any other function. Named as it leaves them.
+[[function]]
+vram = 0x802784E8
+name = "func_802784E8"
+[[function]]
+vram = 0x80186C8C
+name = "func_80186C8C"

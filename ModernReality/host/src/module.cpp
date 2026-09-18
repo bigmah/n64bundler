@@ -2,7 +2,7 @@
 //
 // Opening a game module.
 //
-// The module is a dylib with one exported symbol and a great many undefined
+// The module is a shared library with one exported symbol and a great many undefined
 // ones. dlopen binds the undefined ones against this executable, which is why
 // the host is linked with -export_dynamic and why it force-loads the runtime
 // archives: a symbol the host never calls itself still has to be there for the

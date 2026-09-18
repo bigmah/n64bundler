@@ -317,8 +317,10 @@ extern "C" void spin_wait(uint8_t *rdram, recomp_context *ctx) {
 // the head and dies on the first word of it.
 //
 // What a TLB entry is, though, is an alias -- two addresses, one page -- and
-// `mach_vm_remap` makes exactly that. So the entries are kept as the console
-// keeps them, and the aliases are rebuilt from them whenever they change.
+// a second view of the console's memory is exactly that. So the entries are
+// kept as the console keeps them, and the views are rebuilt from them whenever
+// they change. See `include/modernreality/console_memory.h` for what makes the
+// console's memory something a second view can be taken of.
 //
 // The rebuild works in host pages rather than console pages, because it has
 // to: this machine's pages are 16KB and the console's can be 4KB, and Mario
@@ -328,13 +330,12 @@ extern "C" void spin_wait(uint8_t *rdram, recomp_context *ctx) {
 // not hold there is no alias to make, and the host page is left unmapped so
 // the read faults where it happens rather than reading someone else's data.
 
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <sys/mman.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cstdio>
 #include <vector>
+
+#include "modernreality/console_memory.h"
 
 namespace {
 
@@ -410,21 +411,12 @@ void map_page(uint8_t *rdram, uint32_t vaddr, uint32_t physical, uint32_t bytes)
         complain_once("it is not a user-space address", vaddr, bytes);
         return;
     }
-    mach_vm_address_t target = mach_vm_address_t(flat_address(rdram, vaddr));
-    vm_prot_t current = VM_PROT_READ | VM_PROT_WRITE;
-    vm_prot_t maximum = VM_PROT_READ | VM_PROT_WRITE;
-    const kern_return_t remapped = mach_vm_remap(
-        mach_task_self(), &target, bytes, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
-        mach_vm_address_t(rdram + physical), /*copy=*/FALSE, &current, &maximum, VM_INHERIT_SHARE);
-    if (remapped != KERN_SUCCESS) {
-        complain_once("the alias was refused", vaddr, bytes);
+    if (!n64b::console_memory_backed()) {
+        complain_once("the console's memory has no backing object", vaddr, bytes);
         return;
     }
-    // The remap carries the source's protection over, but says so through an
-    // out parameter rather than promising it, so ask for what is wanted.
-    if (mach_vm_protect(mach_task_self(), target, bytes, FALSE,
-                        VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
-        complain_once("the alias could not be made writable", vaddr, bytes);
+    if (!n64b::alias_console_memory(flat_address(rdram, vaddr), physical, bytes)) {
+        complain_once("the alias was refused", vaddr, bytes);
     }
 }
 
@@ -435,8 +427,7 @@ void unmap_page(uint8_t *rdram, uint32_t vaddr, uint32_t bytes) {
     if ((vaddr & 0x80000000u) != 0) {
         return;
     }
-    void *at = flat_address(rdram, vaddr);
-    (void)::mmap(at, bytes, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    n64b::unalias_console_memory(flat_address(rdram, vaddr), bytes);
 }
 
 /// Rebuild every alias from the entries as they now stand.

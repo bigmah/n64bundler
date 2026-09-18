@@ -117,7 +117,11 @@ class Headless final : public ultramodern::renderer::RendererContext {
 public:
     Headless() {
         setup_result = ultramodern::renderer::SetupResult::Success;
-        chosen_api = ultramodern::renderer::GraphicsApi::Metal;
+        // Nothing is drawn, so this is a label rather than a choice. It still
+        // has to be the one this platform would have used: a headless run
+        // reporting a backend that does not exist here is a confusing thing to
+        // read in a log.
+        chosen_api = graphics_api();
     }
 
     bool valid() override { return true; }
@@ -817,35 +821,31 @@ ultramodern::renderer::callbacks_t headless_renderer_callbacks() {
     };
 }
 
-/// Make the console's memory the memory the caller can see.
+/// Where the caller keeps the console's memory.
 ///
-/// The runtime has already allocated it and put the first megabyte of the
-/// cartridge in it by the time this runs, so the eight megabytes are carried
-/// out, the shared object is mapped over the top of them, and they are carried
-/// back in. From here the two processes are reading and writing the same pages
-/// -- the recompiled code included, which is what makes reading the game's
-/// variables free rather than a request.
+/// A gym's whole point is that the game's memory is in an object both processes
+/// have mapped, so the host does not make a backing object of its own here --
+/// it uses the caller's, and the eight megabytes land at the offset the two
+/// sides agreed on in `gym.h`. `back_console_ram` in main.cpp does the mapping;
+/// this only says where.
+bool gym_console_backing(int &fd, off_t &offset) {
+    if (!gym.active) {
+        return false;
+    }
+    fd = gym.shared_fd;
+    offset = off_t(N64B_GYM_RDRAM_OFFSET);
+    return true;
+}
+
+/// Told where the console's memory ended up, once it is shared.
 ///
-/// This has to happen before the register window is aliased over it, which is
-/// why it is the first thing `place_sections` does: that alias is a second view
-/// of these same pages, and making it first would leave it pointing at the
-/// pages this replaces.
-void gym_map_memory(uint8_t *rdram) {
+/// From here the two processes are reading and writing the same pages -- the
+/// recompiled code included, which is what makes reading the game's variables
+/// free rather than a request.
+void gym_took_memory(uint8_t *rdram) {
     if (!gym.active) {
         return;
     }
-    std::vector<uint8_t> carried(N64B_GYM_RDRAM_BYTES);
-    std::memcpy(carried.data(), rdram, N64B_GYM_RDRAM_BYTES);
-    void *mapped = ::mmap(rdram, N64B_GYM_RDRAM_BYTES, PROT_READ | PROT_WRITE,
-                          MAP_SHARED | MAP_FIXED, gym.shared_fd, N64B_GYM_RDRAM_OFFSET);
-    if (mapped != rdram) {
-        std::fprintf(stderr,
-                     "gym: the console's memory could not be shared (%s); the caller will read "
-                     "an empty game.\n",
-                     std::strerror(errno));
-        return;
-    }
-    std::memcpy(rdram, carried.data(), N64B_GYM_RDRAM_BYTES);
     gym.rdram.store(rdram);
 }
 

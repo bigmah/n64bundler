@@ -11,6 +11,7 @@
 #ifndef N64B_HOST_HPP
 #define N64B_HOST_HPP
 
+#include <sys/types.h>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -52,6 +53,25 @@ bool open_window(const std::string &title, bool fullscreen, bool hidden,
 /// Pump the event queue. Called from the main thread on every iteration of
 /// librecomp's own loop, which is the only place it is safe to do on macOS.
 void pump_window();
+
+/// The graphics API this build draws through.
+///
+/// Exactly one per platform: RT64 uses Metal on macOS and Vulkan everywhere
+/// else, and naming it outright rather than leaving it on "Auto" means a stale
+/// configuration file cannot land on a backend that is not there. RT64's own
+/// enumeration is a different one with the same members; renderer.cpp maps
+/// across.
+constexpr ultramodern::renderer::GraphicsApi graphics_api() {
+#if defined(__APPLE__)
+    return ultramodern::renderer::GraphicsApi::Metal;
+#else
+    return ultramodern::renderer::GraphicsApi::Vulkan;
+#endif
+}
+
+/// A window handle for a game nobody is watching. Not null: null is what a
+/// handle that failed to be made looks like.
+ultramodern::renderer::WindowHandle absent_window();
 
 /// The window's SDL handle, for the parts of RT64 that ask for it.
 struct SDL_Window *window_handle();
@@ -144,8 +164,12 @@ bool gym_picture();
 /// `n64b_gym_draw` in gym.h.
 bool gym_skip_drawing();
 
-/// Map the console's memory into the shared block, before anything aliases it.
-void gym_map_memory(uint8_t *rdram);
+/// Where a gym keeps the console's memory, for `back_console_memory`. False
+/// when there is no gym, and then the host makes a backing object of its own.
+bool gym_console_backing(int &fd, off_t &offset);
+
+/// Told where the console's memory ended up, once it is shared.
+void gym_took_memory(uint8_t *rdram);
 
 /// Start driving, once the game is registered. Returns immediately; the driving
 /// happens on a thread of its own.

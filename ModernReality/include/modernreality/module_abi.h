@@ -2,8 +2,9 @@
 //
 // The contract between a recompiled game and the host that runs it.
 //
-// Every game N64Bundler recompiles becomes one `.dylib` exporting a single
-// symbol, `n64b_module`, of the type below. The host (`n64b-run`) is built
+// Every game N64Bundler recompiles becomes one shared library -- `.dylib` on
+// macOS and `.so` elsewhere -- exporting a single symbol, `n64b_module`, of
+// the type below. The host (`n64b-run`) is built
 // once with RT64, librecomp and ultramodern inside it, and `dlopen`s a module
 // per game. That is the whole reason this file exists: a bundler has a library
 // of games, and linking the renderer into each of them would give every game

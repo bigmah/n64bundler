@@ -5,13 +5,17 @@
 //   n64b-port build --analysis <dir> --rom <rom.z64> --out <module.dylib>
 //   n64b-port info  <module.dylib>
 //
+// The module is a shared library and takes the platform's name for one:
+// `.dylib` on macOS, `.so` everywhere else. Nothing here chooses that -- the
+// caller names the file, and recompn64 and build.sh pick the extension.
+//
 // Three steps, in order:
 //
 //   1. run N64Recomp over the analyser's symbols, which writes a few thousand
 //      recompiled functions as C, a section table, and a header declaring them
 //   2. write module.cpp: the section table wrapped in the descriptor the host
 //      reads, plus the facts about the cartridge that are not in the code
-//   3. compile all of it to one arm64 dylib
+//   3. compile all of it to one shared library, for the architecture this runs on
 //
 // Everything is cached on a key made of the ROM's hash, the tools' revisions
 // and the compiler flags, so re-adding a ROM that has already been ported is
@@ -492,7 +496,7 @@ std::vector<std::string> compile_flags(const Options &options) {
         // the game's physics is downstream of it.
         "-ffp-contract=off",
         "-fno-fast-math",
-        // Position-independent because it is going into a dylib.
+        // Position-independent because it is going into a shared library.
         "-fPIC",
         // The output is machine-written and trips these on purpose: a register
         // assigned and not read is a real instruction, and a label with no
@@ -949,7 +953,15 @@ int build(Options options) {
     // two facts in its descriptor, so compiling it would define them twice.
     fs::remove(generated / "lookup.cpp", ec);
 
+    // Whatever this is running on: the recompiler emits C and the compiler
+    // makes it native, so the architecture is not a choice made anywhere here.
+#if defined(__aarch64__) || defined(_M_ARM64)
     event("step", "3 3 Compiling to native arm64");
+#elif defined(__x86_64__) || defined(_M_X64)
+    event("step", "3 3 Compiling to native x86-64");
+#else
+    event("step", "3 3 Compiling to native code");
+#endif
 
     std::vector<std::string> sources;
     for (const fs::directory_entry &entry : fs::directory_iterator(generated)) {
@@ -1037,11 +1049,20 @@ int build(Options options) {
 
     std::vector<std::string> link;
     link.push_back(options.compiler + "++");
-    link.push_back("-dynamiclib");
     // Every libultra call, every runtime helper and the whole of ultramodern is
-    // an undefined symbol here on purpose: the host exports them and the loader
-    // binds them when the module is opened.
+    // an undefined symbol in the module on purpose: the host exports them and
+    // the loader binds them when the module is opened.
+    //
+    // Mach-O and ELF disagree about that being allowed. Apple's linker rejects
+    // an undefined symbol unless it is told not to; ELF has always let a shared
+    // object leave one for whoever opens it, and saying so is not something its
+    // linker has a spelling for.
+#if defined(__APPLE__)
+    link.push_back("-dynamiclib");
     link.push_back("-Wl,-undefined,dynamic_lookup");
+#else
+    link.push_back("-shared");
+#endif
     link.push_back("-o");
     link.push_back(options.out.string());
     for (const std::string &object : object_paths) {
@@ -1075,7 +1096,7 @@ int build(Options options) {
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: n64b-port build --analysis <dir> --rom <rom.z64> --out <module.dylib>\n"
+                 "usage: n64b-port build --analysis <dir> --rom <rom.z64> --out <module.so|dylib>\n"
                  "                       [--recomp <N64Recomp>] [--cc <clang>] [--include <dir>]\n"
                  "                       [--opt <-O2>] [--jobs <n>] [--force] [--keep-c]\n"
                  "                       [--trace] [--watch <0xADDRESS>[:<bytes>]]\n"

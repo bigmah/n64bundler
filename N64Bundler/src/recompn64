@@ -98,7 +98,33 @@ source "$CONF"
 : "${SIGNATURES:=}"
 : "${TITLES_DIR:=}"
 
-SUPPORT_DIR="$HOME/Library/Application Support/N64Bundler"
+# Where the library lives, and what a module is called.
+#
+# The library is per-user data rather than configuration, so it goes where each
+# platform puts that: Application Support on macOS, and the XDG data directory
+# elsewhere. Anything reading the library from outside -- an environment that
+# wants the recompiled game, say -- has to agree, and does.
+case "$(uname -s)" in
+  Darwin)
+    SUPPORT_DIR="$HOME/Library/Application Support/N64Bundler"
+    LIB_EXT=dylib
+    HAVE_APPS=1
+    ;;
+  *)
+    SUPPORT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/N64Bundler"
+    LIB_EXT=so
+    # No .app, nowhere to install one, and nothing to open it with. This runs
+    # after the options are parsed, so --app has to be answered rather than
+    # quietly dropped.
+    HAVE_APPS=0
+    if [ "$MAKE_APP" -eq 1 ]; then
+      echo "note: --app builds a macOS bundle and there is none to build here;" >&2
+      echo "      the game is going into the library instead." >&2
+    fi
+    MAKE_APP=0
+    AUTO_OPEN=0
+    ;;
+esac
 LIBRARY="$SUPPORT_DIR/library.json"
 COVERS="$SUPPORT_DIR/covers"
 GAMES="$SUPPORT_DIR/games"
@@ -183,7 +209,7 @@ process_one() {
   info game_id "$game_id"
 
   local analysis="$GAMES/$game_id/analysis"
-  local module="$GAMES/$game_id/$game_id.dylib"
+  local module="$GAMES/$game_id/$game_id.$LIB_EXT"
   mkdir -p "$analysis" "$GAMES/$game_id"
 
   # Console memory, after the game's own loader has run. Only a cartridge that
@@ -317,9 +343,11 @@ process_one() {
   if [ -n "$app" ] && [ "$AUTO_OPEN" -eq 1 ]; then
     printf '%sOpening it now. It also lives in %s.%s\n' "$dim" "$APPS_DIR" "$off"
     open "$app"
-  elif [ -z "$app" ]; then
+  elif [ -z "$app" ] && [ "$HAVE_APPS" -eq 1 ]; then
     printf '%sPlay it from N64Bundler, or add --app to build a .app in %s.%s\n' \
       "$dim" "$APPS_DIR" "$off"
+  elif [ -z "$app" ]; then
+    printf '%sIt is in the library at %s.%s\n' "$dim" "$LIBRARY" "$off"
   fi
   emit ok
 }

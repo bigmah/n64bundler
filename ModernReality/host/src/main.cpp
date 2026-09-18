@@ -2,7 +2,7 @@
 //
 // n64b-run - open a recompiled game module and play it.
 //
-//   n64b-run --module <game.dylib> --rom <game.z64> [--fullscreen]
+//   n64b-run --module <game.so> --rom <game.z64> [--fullscreen]
 //            [--config-dir <dir>] [--developer]
 //
 // The module carries the game's code and the facts about the cartridge; the
@@ -21,10 +21,10 @@
 #include <cerrno>
 #include <filesystem>
 #include <sys/mman.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <string>
 #include <vector>
+
+#include <modernreality/console_memory.h>
 
 #include <librecomp/addresses.hpp>
 #include <librecomp/game.hpp>
@@ -49,7 +49,7 @@ struct Options {
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: n64b-run --module <game.dylib> --rom <game.z64>\n"
+                 "usage: n64b-run --module <game.so|dylib> --rom <game.z64>\n"
                  "                [--config-dir <dir>] [--fullscreen] [--developer]\n"
                  "                [--unpack <image.bin>] [--gym <name>] [--headless] [--picture]\n"
                  "\n"
@@ -162,24 +162,41 @@ void map_register_window(uint8_t *rdram) {
     // single object into the world. The game runs, draws and plays its music
     // for as long as you like, and is empty.
     //
-    // One remap makes the two windows the same memory. The eight megabytes are
-    // what the console has; everything above them in the window stays the
-    // zeroed pages the registers want.
-    mach_vm_address_t alias = mach_vm_address_t(rdram + kFirst);
-    vm_prot_t current = VM_PROT_READ | VM_PROT_WRITE;
-    vm_prot_t maximum = VM_PROT_READ | VM_PROT_WRITE;
-    constexpr size_t kRdram = 8u * 1024u * 1024u;
-    const kern_return_t aliased =
-        mach_vm_remap(mach_task_self(), &alias, kRdram, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                      mach_task_self(), mach_vm_address_t(rdram), /*copy=*/FALSE, &current,
-                      &maximum, VM_INHERIT_SHARE);
-    if (aliased != KERN_SUCCESS ||
-        mach_vm_protect(mach_task_self(), alias, kRdram, FALSE,
-                        VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+    // One second view makes the two windows the same memory. The eight
+    // megabytes are what the console has; everything above them in the window
+    // stays the zeroed pages the registers want.
+    if (!n64b::alias_console_memory(rdram + kFirst, 0, kRdramSizeBytes)) {
         std::fprintf(stderr,
                      "note: uncached memory could not be made the same memory as cached. A game "
                      "that reads back what it wrote through 0xA0000000 will read zero.\n");
     }
+}
+
+/// Give the console's memory something the windows above can be views of.
+///
+/// In a gym the caller has already made one and the game's memory has to land
+/// inside it, because reading the game's variables out of the other process is
+/// the whole point of a gym. Otherwise one of our own, which is unlinked as
+/// soon as it exists and so is never visible to anything else.
+///
+/// This runs before either window is mapped, and it has to: both of them are
+/// second views of these same pages, and a view made before the pages are
+/// replaced is a view of the pages that were replaced.
+void back_console_ram(uint8_t *rdram) {
+    int fd = -1;
+    off_t offset = 0;
+    n64b::gym_console_backing(fd, offset);
+
+    std::string error;
+    if (!n64b::back_console_memory(rdram, kRdramSizeBytes, fd, offset, error)) {
+        std::fprintf(stderr,
+                     "note: the console's memory could not be given a backing object (%s).\n"
+                     "      Uncached reads and TLB mappings will not work, and a gym's caller "
+                     "will read an empty game.\n",
+                     error.c_str());
+        return;
+    }
+    n64b::gym_took_memory(rdram);
 }
 
 /// Put the cartridge where the console has it.
@@ -219,7 +236,7 @@ void place_sections(uint8_t *rdram, recomp_context *ctx) {
     // First, because both of the windows below are second views of these same
     // pages and a view made before the pages are shared is a view of the pages
     // that were replaced.
-    n64b::gym_map_memory(rdram);
+    back_console_ram(rdram);
     map_register_window(rdram);
     map_cartridge_window(rdram);
     n64b::set_watch_memory(rdram);
@@ -456,8 +473,7 @@ int main(int argc, char **argv) {
     // presents to it, and drawing only into the console's memory it never does.
     ultramodern::renderer::WindowHandle window_handle{};
     if (n64b::gym_headless() && !n64b::gym_picture()) {
-        window_handle.window = reinterpret_cast<void *>(1);
-        window_handle.view = reinterpret_cast<void *>(1);
+        window_handle = n64b::absent_window();
     } else {
         if (!n64b::open_window(desc.display_name, options.fullscreen, n64b::gym_headless(), window_handle,
                                error)) {
@@ -525,7 +541,7 @@ int main(int argc, char **argv) {
     graphics.wm_option = options.fullscreen ? ultramodern::renderer::WindowMode::Fullscreen
                                             : ultramodern::renderer::WindowMode::Windowed;
     graphics.hr_option = ultramodern::renderer::HUDRatioMode::Original;
-    graphics.api_option = ultramodern::renderer::GraphicsApi::Metal;
+    graphics.api_option = n64b::graphics_api();
     // The game's own aspect ratio, pillarboxed, and deliberately not the
     // window's.
     //

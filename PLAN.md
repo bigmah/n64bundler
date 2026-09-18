@@ -1017,7 +1017,7 @@ Which is the one kind of wrong that nothing reports. A write goes somewhere, a
 read comes back, the value is zero, and the game believes whatever zero means.
 Here it meant a copier was running.
 
-One `mach_vm_remap` makes the two windows the same pages. The eight megabytes
+One second view of the console's memory makes the two windows the same pages. The eight megabytes
 the console has are aliased at `0xA0000000`; everything above them stays the
 zeroed pages the registers want.
 

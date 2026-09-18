@@ -7,15 +7,24 @@
 // any other thread, and librecomp's own main loop is built around calling back
 // into the frontend for exactly this, so the arrangement fits.
 //
-// What RT64 needs from here is two pointers: the NSWindow, which it asks for
-// the size and the refresh rate, and the CAMetalLayer it renders into.
+// What the renderer needs from here is a window in the form its graphics API
+// takes one, and the two are not the same shape. On macOS that is two pointers
+// -- the NSWindow, which RT64 asks for the size and the refresh rate, and the
+// CAMetalLayer it renders into. Everywhere else RT64 draws through Vulkan onto
+// a window SDL made, and the window *is* the handle: ultramodern and plume both
+// spell it `SDL_Window *`, so there is nothing to take apart.
+//
+// That difference is the whole of this file's platform knowledge, apart from a
+// screenshot that only one window server can give.
 
 #include "host.hpp"
 
 #include <SDL.h>
 #include <SDL_syswm.h>
 
+#if defined(__APPLE__)
 #include <ApplicationServices/ApplicationServices.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -26,7 +35,9 @@ namespace n64b {
 namespace {
 
 SDL_Window *window = nullptr;
+#if defined(__APPLE__)
 SDL_MetalView metal_view = nullptr;
+#endif
 bool fullscreen_now = false;
 
 void toggle_fullscreen() {
@@ -34,6 +45,7 @@ void toggle_fullscreen() {
     SDL_SetWindowFullscreen(window, fullscreen_now ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
+#if defined(__APPLE__)
 /// This process's window, as the window server numbers it.
 ///
 /// Found by owner rather than kept from SDL because SDL's own window id is its
@@ -65,6 +77,7 @@ CGWindowID window_server_id() {
     CFRelease(list);
     return found;
 }
+#endif
 
 } // namespace
 
@@ -91,6 +104,27 @@ SDL_Window *window_handle() { return window; }
 ///
 /// The file is a PNG whatever extension was asked for, because that is what
 /// `screencapture` writes.
+///
+/// Only macOS has this. Asking a compositor for a picture of one window is not
+/// something X11 or Wayland offer in any way that is the same on two machines,
+/// and nothing here needs it: a picture of the window is a comparison against a
+/// reference console, and the frame in the console's memory -- which every
+/// platform has -- is what an environment reads. So elsewhere this declines,
+/// and the caller falls back to that frame exactly as it does when the window
+/// server refuses.
+#if !defined(__APPLE__)
+bool capture_window(const char *) {
+    static bool said = false;
+    if (!said) {
+        said = true;
+        std::fprintf(stderr,
+                     "note: a picture of the window is a macOS-only thing here. The frame in "
+                     "the console's memory is being written instead, which may be missing part "
+                     "of the scene.\n");
+    }
+    return false;
+}
+#else
 bool capture_window(const char *path) {
     const CGWindowID id = window_server_id();
     if (id == kCGNullWindowID) {
@@ -129,6 +163,7 @@ bool capture_window(const char *path) {
     std::fprintf(stderr, "note: wrote %s, a picture of the window.\n", named.c_str());
     return true;
 }
+#endif
 
 bool open_window(const std::string &title, bool fullscreen, bool hidden,
                  ultramodern::renderer::WindowHandle &out, std::string &error) {
@@ -137,7 +172,14 @@ bool open_window(const std::string &title, bool fullscreen, bool hidden,
         return false;
     }
 
+    // Which kind of surface the window is made to carry. RT64 draws through
+    // Metal here and Vulkan everywhere else, and SDL has to be told before the
+    // window exists -- the flag is what decides what can be attached to it.
+#if defined(__APPLE__)
     uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_METAL;
+#else
+    uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN;
+#endif
     if (hidden) {
         flags |= SDL_WINDOW_HIDDEN;
     } else if (fullscreen) {
@@ -152,6 +194,7 @@ bool open_window(const std::string &title, bool fullscreen, bool hidden,
         return false;
     }
 
+#if defined(__APPLE__)
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
     if (SDL_GetWindowWMInfo(window, &info) != SDL_TRUE) {
@@ -169,7 +212,31 @@ bool open_window(const std::string &title, bool fullscreen, bool hidden,
 
     out.window = info.info.cocoa.window;
     out.view = SDL_Metal_GetLayer(metal_view);
+#else
+    // Drawing through Vulkan, the window is the handle: plume's RenderWindow
+    // and ultramodern's WindowHandle are both `SDL_Window *`, and the surface
+    // is made from it by RT64 rather than by us. There is nothing to take
+    // apart, and nothing platform-specific left to read out of SDL.
+    out = window;
+#endif
     return true;
+}
+
+/// A window handle for a game nobody is watching.
+///
+/// RT64 sets up its device on a window's layer whether or not it ever presents
+/// to it, so a headless run still has to hand it something, and what a handle
+/// *is* differs by platform. Not null, because null is what a handle that
+/// failed to be made looks like.
+ultramodern::renderer::WindowHandle absent_window() {
+    ultramodern::renderer::WindowHandle handle{};
+#if defined(__APPLE__)
+    handle.window = reinterpret_cast<void *>(1);
+    handle.view = reinterpret_cast<void *>(1);
+#else
+    handle = reinterpret_cast<ultramodern::renderer::WindowHandle>(1);
+#endif
+    return handle;
 }
 
 void pump_window() {

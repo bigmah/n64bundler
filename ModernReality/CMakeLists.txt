@@ -46,13 +46,40 @@ endforeach()
 # host because build.sh reads the symbol list out of it to decide which names
 # the analyser is allowed to use, and that has to work before the host exists.
 
-add_library(modernreality_ultra_gaps STATIC src/ultra_gaps.cpp)
-target_link_libraries(modernreality_ultra_gaps PRIVATE librecomp ultramodern)
+add_library(modernreality_ultra_gaps STATIC
+    src/ultra_gaps.cpp
+    # How the console's memory is given a backing object, so that KSEG1 and the
+    # TLB can be second views of the same pages. Here rather than with the host
+    # because the TLB helpers above are the other caller.
+    src/console_memory.cpp
+)
+target_link_libraries(modernreality_ultra_gaps PRIVATE librecomp ultramodern modernreality_abi)
+if(NOT APPLE AND UNIX)
+    # shm_open and friends were only folded into libc in glibc 2.34; older ones
+    # keep them in librt and are still what a long-term-support distribution
+    # ships.
+    target_link_libraries(modernreality_ultra_gaps PUBLIC rt)
+endif()
 target_include_directories(modernreality_ultra_gaps PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/N64Recomp/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/librecomp/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/vendor/N64ModernRuntime/ultramodern/include"
 )
+
+# ---------------------------------------------------------------------------
+# The tests.
+#
+# One so far, and it is the piece that had to be rewritten to leave macOS: that
+# a second view of the console's memory is the same memory. Run it first on a
+# machine this has not been built on before -- it takes no ROM, no GPU and no
+# game, and it fails loudly where the thing it checks fails silently.
+
+add_executable(console_memory_test tests/console_memory_test.cpp src/console_memory.cpp)
+target_link_libraries(console_memory_test PRIVATE modernreality_abi)
+if(NOT APPLE AND UNIX)
+    target_link_libraries(console_memory_test PRIVATE rt)
+endif()
+target_compile_options(console_memory_test PRIVATE -Wall -Wno-unused-parameter)
 
 # ---------------------------------------------------------------------------
 # n64sig - fingerprinting libultra, so its functions can be named in a ROM.
@@ -123,6 +150,20 @@ target_compile_options(n64b-port PRIVATE -Wall -Wno-unused-parameter)
 # turns it on.
 
 option(MODERNREALITY_HOST "Build the n64b-run host (pulls in RT64)" OFF)
+
+# Whether the host can draw.
+#
+# RT64 is most of this build and all of its platform dependencies: a GPU, a
+# graphics API, and a shader compiler to feed it. A game being driven headless
+# -- `--gym --headless`, which is what an environment uses -- reaches none of
+# it: the display lists the game builds are counted and dropped, and no window
+# is opened. See host/src/gym.cpp.
+#
+# So the renderer comes out on its own switch. OFF gives an n64b-run that runs
+# games and cannot show them, which on a machine with no GPU is the difference
+# between a build that works and a build that cannot be configured.
+option(MODERNREALITY_RENDERER "Build the host with RT64, so it can draw" ON)
+
 if(MODERNREALITY_HOST)
     add_subdirectory(host)
 endif()

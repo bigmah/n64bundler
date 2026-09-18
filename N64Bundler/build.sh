@@ -2,17 +2,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Build the ModernReality tools and runtime, and assemble N64Bundler.app.
 #
-#   ./build.sh              build what is missing, then install to ~/Applications
-#   ./build.sh --rebuild    force a full rebuild first
-#   ./build.sh --no-install leave N64Bundler.app here instead of installing it
-#   ./build.sh --tools-only stop after the analyser and the recompiler
-#   ./build.sh --no-window  stop after the host, leaving out the window and the app
+#   ./build.sh                build what is missing, then install to ~/Applications
+#   ./build.sh --rebuild      force a full rebuild first
+#   ./build.sh --no-install   leave N64Bundler.app here instead of installing it
+#   ./build.sh --tools-only   stop after the analyser and the recompiler
+#   ./build.sh --no-window    stop after the host, leaving out the window and the app
+#   ./build.sh --no-renderer  build a host that runs games and cannot draw them
 #
 # --tools-only skips RT64, which is most of the build, and is what to use while
 # only the analyser is being worked on. --no-window is everything a program that
 # recompiles and drives games itself needs (n64rip, n64b-port, n64b-run --gym),
 # and nothing that is only for playing them from the library. See PLAN.md for
 # what is done and what is not.
+#
+# --no-renderer goes further: it leaves RT64 out of the host as well, which is
+# the whole of this build's dependency on a GPU, a graphics API and a shader
+# compiler. What is left still runs a game and still shares its memory -- it
+# just cannot show it -- which is what an environment driving one headless
+# uses, and is the difference between a build that works on a machine with no
+# GPU and a build that cannot be configured there.
+#
+# The window and the .app are macOS only, and everything else is not: on Linux
+# this stops where --no-window stops, because there is no Dioxus app to build
+# and nothing to install into ~/Applications.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -26,15 +38,63 @@ REBUILD=0
 INSTALL=1
 TOOLS_ONLY=0
 NO_WINDOW=0
+RENDERER=1
 for arg in "$@"; do
   case "$arg" in
     --rebuild) REBUILD=1 ;;
     --no-install) INSTALL=0 ;;
     --tools-only) TOOLS_ONLY=1 ;;
     --no-window) NO_WINDOW=1 ;;
+    --no-renderer) RENDERER=0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+# What is different about this machine.
+#
+# Three things, and they are the whole of it: how many processors there are,
+# what a shared library is called, and whether there is a window server that
+# can be asked for an .app. Everything else below is the same everywhere.
+case "$(uname -s)" in
+  Darwin)
+    PLATFORM=macos
+    NPROC="$(sysctl -n hw.ncpu)"
+    LIB_EXT=dylib
+    # Mach-O puts an underscore in front of every C symbol and ELF does not,
+    # which matters exactly once: reading the runtime's libultra coverage.
+    LEADING_UNDERSCORE=1
+    ;;
+  Linux)
+    PLATFORM=linux
+    NPROC="$(nproc)"
+    LIB_EXT=so
+    LEADING_UNDERSCORE=0
+    # There is no app to assemble and nowhere to install one, so the build
+    # stops where --no-window stops whether or not it was asked for.
+    NO_WINDOW=1
+    ;;
+  *)
+    echo "build.sh knows macOS and Linux, not $(uname -s)." >&2
+    echo "Everything below the window is portable; if you are on a BSD, adding a" >&2
+    echo "case here and a processor count is most likely all it wants." >&2
+    exit 1
+    ;;
+esac
+
+# A host that cannot draw has nothing to put in a window, and the app exists to
+# play games in one -- so --no-renderer stops where --no-window stops. Building
+# the app around such a host would produce something that installs, launches,
+# and fails at the first game.
+if [ "$RENDERER" -eq 0 ]; then
+  NO_WINDOW=1
+fi
+
+# --no-renderer and a build that stops before the host do not interact: RT64 is
+# already out of a --tools-only build. Saying so is worth it because the two
+# flags read as though they might fight.
+if [ "$TOOLS_ONLY" -eq 1 ] && [ "$RENDERER" -eq 0 ]; then
+  echo "note: --tools-only does not build the host at all, so --no-renderer adds nothing."
+fi
 
 bold=$'\033[1m'; off=$'\033[0m'
 step() { printf '\n%s==> %s%s\n' "$bold" "$*" "$off"; }
@@ -43,7 +103,7 @@ for tool in cmake ninja git python3; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
 if [ "$TOOLS_ONLY" -eq 0 ] && [ "$NO_WINDOW" -eq 0 ]; then
-  command -v cargo >/dev/null || { echo "cargo is required to build the window; install Rust or pass --tools-only" >&2; exit 1; }
+  command -v cargo >/dev/null || { echo "cargo is required to build the window; install Rust or pass --no-window" >&2; exit 1; }
 fi
 
 # Where cmake, ninja and the compiler live, deduplicated and absolute.
@@ -159,23 +219,28 @@ step "Configuring ModernReality"
 if [ "$REBUILD" -eq 1 ]; then rm -rf "$MR_BUILD"; fi
 WANT_HOST=ON
 [ "$TOOLS_ONLY" -eq 1 ] && WANT_HOST=OFF
+WANT_RENDERER=ON
+[ "$RENDERER" -eq 0 ] && WANT_RENDERER=OFF
 # Keyed on build.ninja, not CMakeCache.txt: the cache is written before
 # generation, so an interrupted configure leaves one behind and reusing it
 # would hand ninja a directory with nothing to build. Reconfigured as well when
 # the host was left out of an earlier run and is wanted now, which is the usual
 # way a --tools-only tree becomes a full one.
 HAVE_HOST="$(sed -n 's/^MODERNREALITY_HOST:BOOL=//p' "$MR_BUILD/CMakeCache.txt" 2>/dev/null || true)"
-if [ ! -f "$MR_BUILD/build.ninja" ] || [ "$HAVE_HOST" != "$WANT_HOST" ]; then
+HAVE_RENDERER="$(sed -n 's/^MODERNREALITY_RENDERER:BOOL=//p' "$MR_BUILD/CMakeCache.txt" 2>/dev/null || true)"
+if [ ! -f "$MR_BUILD/build.ninja" ] || [ "$HAVE_HOST" != "$WANT_HOST" ] || \
+   [ "$HAVE_RENDERER" != "$WANT_RENDERER" ]; then
   # CMake 4 refuses the pre-3.5 minimums a few of RT64's externals declare.
   cmake -S "$MR_SRC" -B "$MR_BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    -DMODERNREALITY_HOST="$WANT_HOST"
+    -DMODERNREALITY_HOST="$WANT_HOST" \
+    -DMODERNREALITY_RENDERER="$WANT_RENDERER"
 else
   echo "    reusing $MR_BUILD"
 fi
 
 step "Building the analyser and the recompiler"
-cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" \
+cmake --build "$MR_BUILD" -j "$NPROC" \
   --target n64rip n64sig n64b-port modernreality_ultra_gaps N64RecompCLI RSPRecomp
 
 RECOMP_BIN_DIR="$MR_BUILD/vendor/N64ModernRuntime/librecomp/N64Recomp"
@@ -196,11 +261,19 @@ done
 # exactly the set of `<name>_recomp` symbols that exist, and it cannot drift.
 step "Reading the runtime's libultra coverage"
 PROVIDES="$MR_BUILD/runtime-provides.txt"
+# The symbol name is the last field of an nm line on both platforms, and the
+# only difference between them is Mach-O's leading underscore. Taking the field
+# and then stripping that -- rather than matching a pattern that starts with an
+# underscore -- is what makes this read the same list on both: against an ELF
+# archive the old pattern matched `_Thread_recomp` inside `osCreateThread_recomp`
+# and reported a libultra function called `Thread`.
 nm -g "$MR_BUILD/vendor/N64ModernRuntime/librecomp/liblibrecomp.a" \
       "$MR_BUILD/vendor/N64ModernRuntime/ultramodern/libultramodern.a" \
       "$MR_BUILD/libmodernreality_ultra_gaps.a" 2>/dev/null \
-  | grep -oE '_[A-Za-z_][A-Za-z0-9_]*_recomp$' \
-  | sed 's/^_//; s/_recomp$//' | sort -u > "$PROVIDES"
+  | awk -v strip="$LEADING_UNDERSCORE" \
+        '{ name = $NF; if (strip == 1) sub(/^_/, "", name); print name }' \
+  | grep -E '^[A-Za-z_][A-Za-z0-9_]*_recomp$' \
+  | sed 's/_recomp$//' | sort -u > "$PROVIDES"
 echo "    $(wc -l < "$PROVIDES" | tr -d ' ') libultra functions the runtime implements"
 
 # The signature database, if there is anything to build one from.
@@ -248,36 +321,101 @@ if [ "$TOOLS_ONLY" -eq 1 ]; then
   printf '      --runtime-provides %s' "$PROVIDES"
   [ -f "$SIGNATURES" ] && printf ' \\\n      --signatures %s' "$SIGNATURES"
   printf ' \\\n      --titles %s' "$HERE/titles"
-  printf '\n  %s build --analysis /tmp/rip --rom <rom.z64> --out /tmp/game.dylib\n' "$MR_BUILD/n64b-port"
+  printf '\n  %s build --analysis /tmp/rip --rom <rom.z64> --out /tmp/game.%s\n' \
+    "$MR_BUILD/n64b-port" "$LIB_EXT"
   exit 0
 fi
 
 step "Building the host"
-echo "    RT64 is a few hundred source files; the first build takes a while."
-# RT64 compiles its shaders with Apple's metal, which Xcode 26 downloads as a
-# component of its own, and asks for it as `xcrun -sdk macosx metal`. On some
-# installs that finds only Xcode's stub, which says the component is missing,
-# while the component itself answers when it is asked for by name -- seen with
-# Xcode 26.2 (17C52) and the component at 17C7003j. So it is asked for by name
-# when that is the only way it answers.
-if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-  if TOOLCHAINS=Metal xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-    echo "    xcrun finds metal only when asked for the Metal toolchain by name, so it is"
-    export TOOLCHAINS=Metal
+if [ "$RENDERER" -eq 0 ]; then
+  echo "    without RT64: this host will run games and not draw them."
+else
+  echo "    RT64 is a few hundred source files; the first build takes a while."
+  if [ "$PLATFORM" = macos ]; then
+    # RT64 compiles its shaders with Apple's metal, which Xcode 26 downloads as
+    # a component of its own, and asks for it as `xcrun -sdk macosx metal`. On
+    # some installs that finds only Xcode's stub, which says the component is
+    # missing, while the component itself answers when it is asked for by name
+    # -- seen with Xcode 26.2 (17C52) and the component at 17C7003j. So it is
+    # asked for by name when that is the only way it answers.
+    if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+      if TOOLCHAINS=Metal xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+        echo "    xcrun finds metal only when asked for the Metal toolchain by name, so it is"
+        export TOOLCHAINS=Metal
+      else
+        echo "RT64 compiles its shaders with Apple's Metal toolchain, and Xcode does not have it:" >&2
+        echo "    xcodebuild -downloadComponent MetalToolchain" >&2
+        exit 1
+      fi
+    fi
   else
-    echo "RT64 compiles its shaders with Apple's Metal toolchain, and Xcode does not have it:" >&2
-    echo "    xcodebuild -downloadComponent MetalToolchain" >&2
-    exit 1
+    # Elsewhere RT64 draws through Vulkan and compiles its shaders to SPIR-V
+    # with the DXC it vendors -- there is nothing to install for the shaders.
+    # What is needed is the Vulkan headers and loader, and SDL2 to make the
+    # window the renderer draws on.
+    #
+    # Said here rather than left to cmake because the failure lands a few
+    # hundred lines into RT64's own configure, where it reads as RT64 being
+    # broken rather than as a package that is not installed.
+    DXC="$RT64_SRC/src/contrib/dxc/bin/$(uname -m)/dxc-linux"
+    if [ ! -x "$DXC" ]; then
+      echo "RT64 vendors a shader compiler per architecture and has none for $(uname -m):" >&2
+      echo "    looked for $DXC" >&2
+      echo "Pass --no-renderer for a host that runs games without drawing them." >&2
+      exit 1
+    fi
+    if ! { pkg-config --exists vulkan 2>/dev/null || [ -f /usr/include/vulkan/vulkan.h ]; }; then
+      echo "RT64 draws through Vulkan here and its headers are not installed." >&2
+      echo "    Debian/Ubuntu: apt install libvulkan-dev libsdl2-dev" >&2
+      echo "    Fedora:        dnf install vulkan-loader-devel vulkan-headers SDL2-devel" >&2
+      echo "Pass --no-renderer for a host that runs games without drawing them." >&2
+      exit 1
+    fi
   fi
 fi
-cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" --target n64b-run
+cmake --build "$MR_BUILD" -j "$NPROC" --target n64b-run
 [ -x "$MR_BUILD/host/n64b-run" ] || { echo "expected $MR_BUILD/host/n64b-run to exist" >&2; exit 1; }
+
+# Where everything is, for recompn64.
+#
+# It sits next to the script rather than only inside the app bundle, because
+# the script is the pipeline and the bundle is one way of reaching it -- and on
+# a platform with no bundle it is the only way. The app gets a copy.
+step "Writing the toolchain configuration"
+cat > "$HERE/src/toolchain.conf" <<CONF
+# Written by N64Bundler/build.sh. Absolute paths to the ModernReality build
+# that analyses, recompiles, and runs ROMs. Re-run build.sh if the checkout
+# moves: the generated apps reference these paths directly.
+REPO_ROOT=$(printf '%q' "$ROOT")
+MR_SRC=$(printf '%q' "$MR_SRC")
+MR_BUILD=$(printf '%q' "$MR_BUILD")
+RECOMP_BIN_DIR=$(printf '%q' "$RECOMP_BIN_DIR")
+RUNTIME_PROVIDES=$(printf '%q' "$PROVIDES")
+SIGNATURES=$(printf '%q' "$SIGNATURES")
+TITLES_DIR=$(printf '%q' "$HERE/titles")
+APPS_DIR=$(printf '%q' "$INSTALL_DIR")
+# Where cmake, ninja and clang were found. A Finder-launched app gets launchd's
+# PATH, which has no Homebrew on it, so the pipeline puts these back itself.
+TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
+CONF
+echo "    $HERE/src/toolchain.conf"
 
 if [ "$NO_WINDOW" -eq 1 ]; then
   printf '\n%sTools and host built.%s Recompile a ROM with:\n' "$bold" "$off"
   printf '  %s analyze <rom.z64> --out-dir <dir> --runtime-provides %s --titles %s\n' \
     "$MR_BUILD/n64rip" "$PROVIDES" "$HERE/titles"
-  printf '  %s build --analysis <dir> --rom <rom.z64> --out <game.dylib>\n' "$MR_BUILD/n64b-port"
+  printf '  %s build --analysis <dir> --rom <rom.z64> --out <game.%s>\n' \
+    "$MR_BUILD/n64b-port" "$LIB_EXT"
+  printf '\nAnd drive it from a program of your own:\n'
+  printf '  %s --module <game.%s> --rom <rom.z64> --gym <name> --headless\n' \
+    "$MR_BUILD/host/n64b-run" "$LIB_EXT"
+  printf '  (%s is the whole of what passes between the two processes)\n' \
+    "$MR_SRC/include/modernreality/gym.h"
+  printf '\nOr let the pipeline do all of it and put the game in the library:\n'
+  printf '  %s <rom.z64>\n' "$HERE/src/recompn64"
+  if [ "$RENDERER" -eq 0 ]; then
+    printf '\nThis host has no renderer, so --headless is the only way it will start.\n'
+  fi
   exit 0
 fi
 
@@ -331,22 +469,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-cat > "$RES/toolchain.conf" <<CONF
-# Written by N64Bundler/build.sh. Absolute paths to the ModernReality build
-# that analyses, recompiles, and runs ROMs. Re-run build.sh if the checkout
-# moves: the generated apps reference these paths directly.
-REPO_ROOT=$(printf '%q' "$ROOT")
-MR_SRC=$(printf '%q' "$MR_SRC")
-MR_BUILD=$(printf '%q' "$MR_BUILD")
-RECOMP_BIN_DIR=$(printf '%q' "$RECOMP_BIN_DIR")
-RUNTIME_PROVIDES=$(printf '%q' "$PROVIDES")
-SIGNATURES=$(printf '%q' "$SIGNATURES")
-TITLES_DIR=$(printf '%q' "$HERE/titles")
-APPS_DIR=$(printf '%q' "$INSTALL_DIR")
-# Where cmake, ninja and clang were found. A Finder-launched app gets launchd's
-# PATH, which has no Homebrew on it, so the pipeline puts these back itself.
-TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
-CONF
+install -m 644 "$HERE/src/toolchain.conf" "$RES/toolchain.conf"
 
 if [ "$INSTALL" -eq 1 ]; then
   step "Installing to $INSTALL_DIR"

@@ -78,6 +78,41 @@ few minutes; everything after that is seconds.
 `./N64Bundler/build.sh --tools-only` skips RT64 and the window, and is what to
 use if all you want is the analyser.
 
+### On Linux
+
+Everything below the window builds and runs on Linux, on x86-64 and on arm64 —
+the recompiled game is C compiled for whatever this is, and the runtime already
+carries `sse2neon` for the one place it reaches for SSE.
+
+```sh
+./N64Bundler/build.sh                 # the tools and a host that draws
+./N64Bundler/build.sh --no-renderer   # the tools and a host that does not
+```
+
+There is no window and no `.app`: the Dioxus front end and the bundle it goes
+into are macOS only, so the build stops where `--no-window` stops and the games
+go into the library at `${XDG_DATA_HOME:-~/.local/share}/N64Bundler`. Drive a
+game from your own program with `n64b-run --gym`, which is what
+[the section on that](#a-game-something-else-is-playing) is about.
+
+Requirements: `cmake`, `ninja`, `python3`, a C++20 compiler, and SDL2
+(`libsdl2-dev`). A host that draws also wants the Vulkan headers and loader
+(`libvulkan-dev`) — RT64 uses Vulkan here rather than Metal, and compiles its
+own shaders with the DXC it vendors, so there is nothing else to install.
+
+`--no-renderer` leaves RT64 out of the host altogether, which is the whole of
+this build's dependency on a GPU, a graphics API and a shader compiler. What
+is left runs a game and shares its memory and cannot show it — which is
+exactly what an environment driving one headless uses, and on a machine with
+no GPU is the difference between a build that works and a build that cannot be
+configured. It is also about a fifth of the size and a small fraction of the
+build time.
+
+The one piece that had to be rewritten to leave macOS is how the console's
+memory gets its second views — KSEG1 and the TLB. `ModernReality/build/console_memory_test`
+checks that directly, takes no ROM and no GPU, and is the first thing to run on
+a machine this has not been built on before.
+
 ## What is in here
 
 N64Bundler is the glue. The heavy lifting is upstream, pinned as submodules:
@@ -88,7 +123,7 @@ N64Bundler is the glue. The heavy lifting is upstream, pinned as submodules:
 | `ModernReality/` | the analyser, the host, the tools around them | this repo |
 | `ModernReality/vendor/N64ModernRuntime/` | `ultramodern` and `librecomp`: libultra, overlays, saves | [N64Recomp/N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) |
 | `ModernReality/vendor/N64ModernRuntime/N64Recomp/` | the recompiler: MIPS to C | [N64Recomp/N64Recomp](https://github.com/N64Recomp/N64Recomp) |
-| `ModernReality/vendor/rt64/` | the renderer, on Metal | [rt64/rt64](https://github.com/rt64/rt64) |
+| `ModernReality/vendor/rt64/` | the renderer: Metal on macOS, Vulkan elsewhere | [rt64/rt64](https://github.com/rt64/rt64) |
 
 "Project Reality" was the N64's development codename and the RCP is its
 Reality Coprocessor, which is where `ModernReality` gets its name — the
@@ -351,8 +386,9 @@ the moment the game starts.
 megabytes read past the cache. The register window this host maps so that a
 store to a hardware register lands somewhere was covering the bottom of that
 window too, with zeroed pages of its own, so a game that wrote through one
-window and read back through the other read zero and believed it. One
-`mach_vm_remap` makes the two windows the same pages.
+window and read back through the other read zero and believed it. One second
+view of the console's memory makes the two windows the same pages — see
+[`console_memory.h`](ModernReality/include/modernreality/console_memory.h).
 
 **A thread has to be interruptible.** Between the cutscene and the title
 screen the game walks its sixty sound emitters and goes round again until none
@@ -425,6 +461,22 @@ where it ended.
 What it was built for is [an RL environment](https://github.com/bigmah/rl) that
 learns to make Mario run fast, but nothing here knows anything about Mario, or
 about learning. It is a console with the clock taken out.
+
+Two things to know before running many of these on a Linux box, neither of
+which is a problem on a machine you own and both of which are confusing inside
+a container:
+
+- **The shared block is in `/dev/shm`.** Each console asks for about 9 MB of
+  it, so eight of them want ~74 MB, and Docker gives a container 64 MB by
+  default. Over that limit `shm_open` and `ftruncate` fail in the caller rather
+  than in the game, which reads as the environment being broken. `--shm-size`
+  is the fix.
+- **Each console reserves 4 GB of address space.** That is librecomp holding
+  the whole range a translated address can reach, and it is reserved rather
+  than committed — `PROT_NONE` pages that are never backed by anything. The
+  default Linux overcommit heuristic does not count it, but strict overcommit
+  (`vm.overcommit_memory=2`) does, and will refuse the eleventh console on a
+  32 GB machine for memory none of them are using.
 
 ## Legal
 

@@ -30,6 +30,13 @@
 #include <string>
 #include <vector>
 
+// For the thread RT64 is set up on, which every platform names differently.
+#include <pthread.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 #include <librecomp/game.hpp>
 
 #include <librecomp/rsp.hpp>
@@ -137,8 +144,16 @@ public:
                 bool developer_mode)
         : developer_(developer_mode) {
         RT64::Application::Core core{};
+        // What a window is to the renderer is not the same shape everywhere:
+        // two AppKit pointers on macOS, and the SDL window itself where RT64
+        // draws through Vulkan. plume's RenderWindow and ultramodern's
+        // WindowHandle already agree per platform, so this is only a copy.
+#if defined(__APPLE__)
         core.window.window = window_handle.window;
         core.window.view = window_handle.view;
+#else
+        core.window = window_handle;
+#endif
 
         // The ROM header, which RT64 hashes to pick up any per-game
         // configuration it ships. librecomp has the image in memory by now
@@ -197,11 +212,20 @@ public:
         app_->userConfig.developerMode = developer_mode;
         apply_config(ultramodern::renderer::get_graphics_config());
 
+        // RT64 wants the thread it is being set up on, and every platform
+        // spells "which thread am I" differently. It is only ever compared
+        // against itself, so any stable number for this thread will do.
         uint64_t thread_id = 0;
+#if defined(__APPLE__)
         pthread_threadid_np(nullptr, &thread_id);
+#elif defined(__linux__)
+        thread_id = uint64_t(::syscall(SYS_gettid));
+#else
+        thread_id = uint64_t(reinterpret_cast<uintptr_t>(pthread_self()));
+#endif
         const RT64::Application::SetupResult result = app_->setup(uint32_t(thread_id));
         setup_result = map_setup_result(result);
-        chosen_api = ultramodern::renderer::GraphicsApi::Metal;
+        chosen_api = graphics_api();
         if (result != RT64::Application::SetupResult::Success) {
             app_.reset();
             return;
@@ -547,10 +571,14 @@ public:
 private:
     void apply_config(const ultramodern::renderer::GraphicsConfig &config) {
         RT64::UserConfiguration &user = app_->userConfig;
-        // Metal is the only backend that exists on this platform, and picking
-        // it outright means a misconfigured "Auto" cannot land on a backend
-        // that is not there.
+        // One backend exists on each platform, and picking it outright means a
+        // misconfigured "Automatic" -- or one read back out of RT64's own
+        // configuration file -- cannot land on a backend that is not there.
+#if defined(__APPLE__)
         user.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Metal;
+#else
+        user.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Vulkan;
+#endif
         user.antialiasing = map_antialiasing(config.msaa_option);
         user.aspectRatio = map_aspect(config.ar_option);
         user.refreshRate = map_refresh_rate(config.rr_option);
@@ -608,7 +636,15 @@ std::unique_ptr<ultramodern::renderer::RendererContext> create_context(
 }
 
 std::string api_name(ultramodern::renderer::GraphicsApi api) {
-    return api == ultramodern::renderer::GraphicsApi::Metal ? "Metal" : "Metal (the only one here)";
+    switch (api) {
+        case ultramodern::renderer::GraphicsApi::Metal: return "Metal";
+        case ultramodern::renderer::GraphicsApi::Vulkan: return "Vulkan";
+        case ultramodern::renderer::GraphicsApi::D3D12: return "D3D12";
+        default: break;
+    }
+    // Asked about a backend this build does not have, which means something
+    // chose one for us; say what is actually being used instead.
+    return api_name(graphics_api()) + " (the only one here)";
 }
 
 } // namespace

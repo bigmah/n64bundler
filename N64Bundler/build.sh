@@ -120,17 +120,33 @@ for tool in cmake ninja clang; do
   esac
 done
 
-step "Checking out the submodules"
-if [ ! -f "$MR_SRC/vendor/N64ModernRuntime/CMakeLists.txt" ] || \
-   [ ! -f "$MR_SRC/vendor/rt64/CMakeLists.txt" ]; then
-  echo "    fetching submodules (RT64 and its externals are a few hundred MB)"
-  git -C "$ROOT" submodule update --init --recursive --depth 1
-else
-  echo "    already present"
+# RT64 is 400MB of the renderer and its externals against the runtime's 33MB,
+# and only a host that draws is built from it: --tools-only builds no host and
+# --no-renderer builds one without it. So it is fetched, checked and patched
+# only when it is used, which is most of the download on a machine with no GPU.
+NEED_RT64=1
+if [ "$TOOLS_ONLY" -eq 1 ] || [ "$RENDERER" -eq 0 ]; then
+  NEED_RT64=0
 fi
-for f in "$MR_SRC/vendor/N64ModernRuntime/CMakeLists.txt" \
-         "$MR_SRC/vendor/N64ModernRuntime/N64Recomp/CMakeLists.txt" \
-         "$MR_SRC/vendor/rt64/CMakeLists.txt"; do
+
+step "Checking out the submodules"
+fetched=0
+if [ ! -f "$MR_SRC/vendor/N64ModernRuntime/CMakeLists.txt" ] || \
+   [ ! -f "$MR_SRC/vendor/N64ModernRuntime/N64Recomp/CMakeLists.txt" ]; then
+  echo "    fetching the runtime and the recompiler"
+  git -C "$ROOT" submodule update --init --recursive --depth 1 -- ModernReality/vendor/N64ModernRuntime
+  fetched=1
+fi
+if [ "$NEED_RT64" -eq 1 ] && [ ! -f "$MR_SRC/vendor/rt64/CMakeLists.txt" ]; then
+  echo "    fetching RT64 (it and its externals are a few hundred MB)"
+  git -C "$ROOT" submodule update --init --recursive --depth 1 -- ModernReality/vendor/rt64
+  fetched=1
+fi
+[ "$fetched" -eq 1 ] || echo "    already present"
+REQUIRED=("$MR_SRC/vendor/N64ModernRuntime/CMakeLists.txt"
+          "$MR_SRC/vendor/N64ModernRuntime/N64Recomp/CMakeLists.txt")
+[ "$NEED_RT64" -eq 0 ] || REQUIRED+=("$MR_SRC/vendor/rt64/CMakeLists.txt")
+for f in "${REQUIRED[@]}"; do
   [ -f "$f" ] || {
     echo "missing $f" >&2
     echo "The submodules did not come down; run: git -C $ROOT submodule update --init --recursive" >&2
@@ -191,7 +207,12 @@ series_matches() {
   return $rc
 }
 
-for which in recomp runtime rt64; do
+# Only the checkouts this build uses. RT64 left unfetched is an empty directory,
+# and `git -C` there is the superproject: asking it for RT64's files, or applying
+# RT64's patches, would be asking N64Bundler's own tree.
+PATCHED=(recomp runtime)
+[ "$NEED_RT64" -eq 0 ] || PATCHED+=(rt64)
+for which in "${PATCHED[@]}"; do
   case "$which" in
     recomp)  target="$RECOMP_SRC" ;;
     runtime) target="$RUNTIME_SRC" ;;
@@ -373,8 +394,21 @@ else
     fi
   fi
 fi
-cmake --build "$MR_BUILD" -j "$NPROC" --target n64b-run
+cmake --build "$MR_BUILD" -j "$NPROC" --target n64b-run console_memory_test
 [ -x "$MR_BUILD/host/n64b-run" ] || { echo "expected $MR_BUILD/host/n64b-run to exist" >&2; exit 1; }
+
+# That a second view of the console's memory is the same memory, on this
+# machine. A host that runs without it runs games that are silently wrong, so it
+# is checked every build rather than left for someone to remember: it takes a
+# few milliseconds, no ROM and no GPU.
+step "Checking the console's memory"
+if ! "$MR_BUILD/console_memory_test" >"$MR_BUILD/console_memory_test.log" 2>&1; then
+  cat "$MR_BUILD/console_memory_test.log" >&2
+  echo "A second view of the console's memory is not the same memory on this machine," >&2
+  echo "so a game would run and be wrong. See ModernReality/include/modernreality/console_memory.h." >&2
+  exit 1
+fi
+echo "    one memory through every view"
 
 # Where everything is, for recompn64.
 #

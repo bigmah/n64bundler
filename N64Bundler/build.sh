@@ -254,6 +254,22 @@ fi
 
 step "Building the host"
 echo "    RT64 is a few hundred source files; the first build takes a while."
+# RT64 compiles its shaders with Apple's metal, which Xcode 26 downloads as a
+# component of its own, and asks for it as `xcrun -sdk macosx metal`. On some
+# installs that finds only Xcode's stub, which says the component is missing,
+# while the component itself answers when it is asked for by name -- seen with
+# Xcode 26.2 (17C52) and the component at 17C7003j. So it is asked for by name
+# when that is the only way it answers.
+if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+  if TOOLCHAINS=Metal xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+    echo "    xcrun finds metal only when asked for the Metal toolchain by name, so it is"
+    export TOOLCHAINS=Metal
+  else
+    echo "RT64 compiles its shaders with Apple's Metal toolchain, and Xcode does not have it:" >&2
+    echo "    xcodebuild -downloadComponent MetalToolchain" >&2
+    exit 1
+  fi
+fi
 cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" --target n64b-run
 [ -x "$MR_BUILD/host/n64b-run" ] || { echo "expected $MR_BUILD/host/n64b-run to exist" >&2; exit 1; }
 

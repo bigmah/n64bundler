@@ -9,6 +9,7 @@
 
 #include "signature.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <map>

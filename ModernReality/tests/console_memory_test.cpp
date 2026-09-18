@@ -18,7 +18,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <string>
 
 #include <sys/mman.h>
@@ -33,6 +32,30 @@ void check(bool ok, const char *what) {
     if (!ok) {
         failures++;
     }
+}
+
+// Two views of one page are the same memory only to the kernel. To the compiler
+// they are two addresses in one mapping a known distance apart, which cannot
+// overlap, so it may move a read through one ahead of a write through the other
+// -- and then the check reads what was there before the write, and fails a
+// property that holds. Clang and GCC both do at -O2. So every access that has to
+// see through a view is volatile: stored and loaded where it is written, in the
+// order it is written.
+void put(uint8_t *at, const char (&word)[5]) {
+    volatile uint8_t *bytes = at;
+    for (int i = 0; i < 4; i++) {
+        bytes[i] = uint8_t(word[i]);
+    }
+}
+
+bool holds(const uint8_t *at, const char (&word)[5]) {
+    const volatile uint8_t *bytes = at;
+    for (int i = 0; i < 4; i++) {
+        if (bytes[i] != uint8_t(word[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 constexpr size_t kRdram = 8u * 1024u * 1024u;
@@ -62,7 +85,7 @@ int main() {
     // the cartridge in it by the time the backing object arrives and losing
     // that would start a game at an entrypoint of zeroes.
     for (size_t i = 0; i < kRdram; i += 4096) {
-        std::memcpy(base + i, "keep", 4);
+        put(base + i, "keep");
     }
 
     std::string error;
@@ -73,7 +96,7 @@ int main() {
 
     bool kept = true;
     for (size_t i = 0; i < kRdram && kept; i += 4096) {
-        kept = std::memcmp(base + i, "keep", 4) == 0;
+        kept = holds(base + i, "keep");
     }
     check(kept, "what was in it is still in it");
 
@@ -86,11 +109,11 @@ int main() {
     check(n64b::alias_console_memory(base + kUncached, 0, kRdram),
           "the uncached window becomes a second view");
 
-    std::memcpy(base + 0x1000, "cach", 4);
-    check(std::memcmp(base + kUncached + 0x1000, "cach", 4) == 0,
+    put(base + 0x1000, "cach");
+    check(holds(base + kUncached + 0x1000, "cach"),
           "a write through the cached window is read through the uncached one");
-    std::memcpy(base + kUncached + 0x2000, "uncd", 4);
-    check(std::memcmp(base + 0x2000, "uncd", 4) == 0, "and the other way round");
+    put(base + kUncached + 0x2000, "uncd");
+    check(holds(base + 0x2000, "uncd"), "and the other way round");
 
     // A TLB entry: a page of the console's memory showing up somewhere else.
     // The real one lands in KUSEG; here it only has to be a different address.
@@ -102,15 +125,14 @@ int main() {
         return 1;
     }
     check(n64b::alias_console_memory(elsewhere, physical, page), "a TLB page is aliased");
-    std::memcpy(base + physical, "tlb!", 4);
-    check(std::memcmp(elsewhere, "tlb!", 4) == 0, "and is the page it was mapped from");
+    put(base + physical, "tlb!");
+    check(holds(elsewhere, "tlb!"), "and is the page it was mapped from");
 
-    std::memcpy(elsewhere + 64, "back", 4);
-    check(std::memcmp(base + physical + 64, "back", 4) == 0, "writes to it land in the console");
+    put(elsewhere + 64, "back");
+    check(holds(base + physical + 64, "back"), "writes to it land in the console");
 
     n64b::unalias_console_memory(elsewhere, page);
-    check(std::memcmp(base + physical, "tlb!", 4) == 0,
-          "putting it back leaves the console's own memory alone");
+    check(holds(base + physical, "tlb!"), "putting it back leaves the console's own memory alone");
 
     // A view that ran off the end of the object would read as zero and write
     // nowhere, which is the failure this is all here to avoid.

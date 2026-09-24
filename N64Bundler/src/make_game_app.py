@@ -351,6 +351,7 @@ mkdir -p "$LOG_DIR"
 exec "$RUNTIME_DIR/n64b-run" \\
   --module "$MODULE_PATH" \\
   --rom "$ROM_PATH" \\
+  --config-dir "$CONFIG_DIR" \\
   >>"$LOG_DIR/{game_id}.log" 2>&1
 """
 
@@ -385,7 +386,14 @@ def build_bundle(args, art):
     }
     (bundle / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
 
-    log_dir = Path.home() / "Library" / "Application Support" / "N64Bundler" / "logs"
+    # Beside the library the game was registered in, so a bundle built for a
+    # library kept somewhere else (N64BUNDLER_HOME) plays with that library's
+    # saves rather than the default one's.
+    if args.library:
+        config_dir = Path(args.library).resolve().parent
+    else:
+        config_dir = Path.home() / "Library" / "Application Support" / "N64Bundler"
+    log_dir = config_dir / "logs"
     conf = "\n".join(
         f"{key}={shell_quote(value)}"
         for key, value in [
@@ -395,6 +403,7 @@ def build_bundle(args, art):
             ("MODULE_PATH", args.module),
             ("RUNTIME_DIR", args.runtime),
             ("LOG_DIR", log_dir),
+            ("CONFIG_DIR", config_dir),
         ]
     )
     (resources / "game.conf").write_text(conf + "\n")

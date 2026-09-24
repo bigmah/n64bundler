@@ -478,6 +478,23 @@ a container:
   (`vm.overcommit_memory=2`) does, and will refuse the eleventh console on a
   32 GB machine for memory none of them are using.
 
+## Embedding it
+
+`bundler.json` at the top of the checkout describes N64Bundler to a program
+that drives it instead of the window -- a launcher that holds several consoles
+at once, say. It names the build to run, the pipeline, the command that plays a
+library entry, and which of the library's directories hold saves. Paths in it
+are relative to the checkout; `{data}` and `{build}` are wherever the embedding
+program keeps generated files and are handed down as two variables:
+
+- `N64BUNDLER_HOME` moves the library, the logs and the runtime's saves out of
+  `~/Library/Application Support/N64Bundler`. `recompn64 play` passes it to the
+  host as `--config-dir`, and a `.app` built for that library does the same.
+- `N64BUNDLER_BUILD_DIR` moves the ModernReality build out of
+  `ModernReality/build`.
+
+Both default to where they always were, so nothing changes for the window.
+
 ## Legal
 
 **No game data ships here, ever.** No ROM, extracted asset, or Nintendo code;

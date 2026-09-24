@@ -52,6 +52,10 @@ struct Index {
 }
 
 pub fn support_dir() -> PathBuf {
+    // Agrees with recompn64, which honours the same override.
+    if let Some(dir) = std::env::var_os("N64BUNDLER_HOME").filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home).join("Library/Application Support/N64Bundler")
 }

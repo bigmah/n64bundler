@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "n64",
+  "name": "Nintendo 64",
+  "short_name": "N64",
+  "media": "ROM",
+  "extensions": ["z64", "n64", "v64"],
+  "tool": "N64Bundler/src/recompn64",
+  "env": {
+    "N64BUNDLER_HOME": "{data}",
+    "N64BUNDLER_BUILD_DIR": "{build}"
+  },
+  "build": {
+    "command": ["N64Bundler/build.sh", "--no-window"],
+    "produces": ["N64Bundler/src/toolchain.conf", "{build}/host/n64b-run", "{build}/n64b-port"]
+  },
+  "add": ["--porcelain", "{file}"],
+  "library": {
+    "path": "{data}/library.json",
+    "id": "game_id",
+    "source": "rom",
+    "requires": ["rom", "module"]
+  },
+  "play": ["play", "--game-id", "{game_id}", "--rom", "{rom}", "--module", "{module}", "--title", "{name}"],
+  "make_app": ["make-app", "--porcelain", "--game-id", "{game_id}", "--rom", "{rom}", "--module", "{module}", "--title", "{name}"],
+  "log": "{data}/logs/{game_id}.log",
+  "saves": {
+    "{data}/saves": "."
+  }
+}

@@ -30,7 +30,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 MR_SRC="$ROOT/ModernReality"
-MR_BUILD="$MR_SRC/build"
+# N64BUNDLER_BUILD_DIR puts the build somewhere else, for a program that embeds
+# this checkout and keeps what it generates in a cache of its own.
+MR_BUILD="${N64BUNDLER_BUILD_DIR:-$MR_SRC/build}"
 APP="$HERE/N64Bundler.app"
 INSTALL_DIR="$HOME/Applications"
 

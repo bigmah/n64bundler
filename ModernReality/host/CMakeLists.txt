@@ -9,6 +9,14 @@
 
 find_package(SDL2 REQUIRED)
 
+# RT64's copy of hlsl++ calls labs() without including <cstdlib>, and the newer
+# macOS SDKs no longer pull it in through any other header, so the build stops
+# at "use of undeclared identifier 'labs'". The host includes those headers
+# too, so the fix goes on the whole directory: RT64 and n64b-run both.
+if(APPLE)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstdlib>")
+endif()
+
 if(MODERNREALITY_RENDERER)
     # RT64 comes in static.
     #
